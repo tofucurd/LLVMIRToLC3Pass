@@ -1,4 +1,4 @@
-# A Simple LLVM-IR To LC-3 Assembly Pass
+# A Simple LLVM-IR To LC-3 Assembly LLVM Pass
 
 ## Introduction
 
