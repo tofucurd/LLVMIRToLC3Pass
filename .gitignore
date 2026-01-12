@@ -1,0 +1,5 @@
+build/
+*.ll
+*.asm
+*.obj
+*.sym
