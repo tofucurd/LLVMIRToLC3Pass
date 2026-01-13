@@ -126,7 +126,7 @@ void LC3Mul(ToolOutputFile &Out, int &TempLabelCounter, int ResID, int AID,
 }
 
 auto ParseError(Instruction &I) {
-  errs() << " ";
+  errs() << "Unsupported Instruction: ";
   I.print(errs());
   errs() << "\nNo File Generated\n";
   return PreservedAnalyses::all();
@@ -266,6 +266,18 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Function &F,
           break;
         case CmpInst::ICMP_SLE:
           Out.os() << "\tBRp\t\tTEMPLABEL_" << ++TempLabelCounter << "\n";
+          break;
+        case CmpInst::ICMP_UGE:
+          Out.os() << "\tBRn\t\tTEMPLABEL_" << ++TempLabelCounter << "\n";
+          break;
+        case CmpInst::ICMP_UGT:
+          Out.os() << "\tBRnz\tTEMPLABEL_" << ++TempLabelCounter << "\n";
+          break;
+        case CmpInst::ICMP_ULE:
+          Out.os() << "\tBRp\t\tTEMPLABEL_" << ++TempLabelCounter << "\n";
+          break;
+        case CmpInst::ICMP_ULT:
+          Out.os() << "\tBRzp\tTEMPLABEL_" << ++TempLabelCounter << "\n";
           break;
         default:
           return ParseError(I);
@@ -412,6 +424,9 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Function &F,
             } else {
               return ParseError(I);
             }
+          } else if (Func->getName() == "llvm.lifetime.start.p0" ||
+                     Func->getName() == "llvm.lifetime.end.p0") {
+            continue;
           } else {
             return ParseError(I);
           }
@@ -423,8 +438,9 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Function &F,
       } else if (auto *PHIN = dyn_cast<PHINode>(&I)) {
         int ResID = getID(&I, ValueIDMap, ValueIDCounter);
 
-        Out.os() << "\tNOT\t\tR6, R6\n"
-                 << "\tADD\t\tR6, R6, #1\n";
+        Out.os() << "\tADD\t\tR5, R6, #0\n"
+                 << "\tNOT\t\tR5, R5\n"
+                 << "\tADD\t\tR5, R5, #1\n";
         int EndLableID = TempLabelCounter + PHIN->getNumIncomingValues();
         for (unsigned int i = 0; i < PHIN->getNumIncomingValues(); ++i) {
           Value *Val = PHIN->getIncomingValue(i);
@@ -435,7 +451,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Function &F,
           int SrcBBID = getID(SrcBB, BBIDMap, BBIDCounter);
 
           Out.os() << "\tLEA\t\tR1, LABEL_" << SrcBBID << "\n"
-                   << "\tADD\t\tR1, R1, R6\n"
+                   << "\tADD\t\tR1, R1, R5\n"
                    << "\tBRnp\tTEMPLABEL_" << ++TempLabelCounter << "\n"
                    << "\tLD\t\tR1, VALUE_" << ValID << "\n"
                    << "\tST\t\tR1, VALUE_" << ResID << "\n"
@@ -443,6 +459,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Function &F,
                    << "TEMPLABEL_" << TempLabelCounter << "\n";
         }
       } else if (auto *RetI = dyn_cast<ReturnInst>(&I)) {
+        Out.os() << "\tHALT\n";
         continue;
       } else if (I.getOpcode() == Instruction::ZExt ||
                  I.getOpcode() == Instruction::SExt ||
@@ -482,7 +499,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Function &F,
     }
   }
 
-  Out.os() << "\tHALT\n" << AllocateBufferStream.str() << "\n\t.END";
+  Out.os() << AllocateBufferStream.str() << "\n\t.END";
 
   Out.keep();
 
