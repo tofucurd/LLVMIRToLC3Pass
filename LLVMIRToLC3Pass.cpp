@@ -444,7 +444,6 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
             } else if (CallI->arg_size() <= 5 && FuncIDMap.count(Func)) {
               int FuncID = FuncIDMap[Func];
               if (int ArgSize = CallI->arg_size()) {
-                InstBufferStream << "; ArgSize: " << ArgSize << "\n";
                 for (int i = 0; i < ArgSize; i++) {
                   Value *Arg = CallI->getArgOperand(i);
                   int ArgID = getID(Arg, ValueIDMap, ValueIDCounter);

@@ -52,4 +52,4 @@ If you get error message begin with ``Unsupported instruction:``, then it means 
 
 ## TODO
 
-Rewrite the project with LLVM Backend.
+Add support for stack allocation.
