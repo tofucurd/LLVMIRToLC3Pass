@@ -2,7 +2,7 @@
 
 ## Introduction
 
-This is a simple LLVM pass that can translate a subset of LLVM-IR Instructions (generated from C code) into LC-3 Assembly. It Support the following LLVM-IR Instructions: ``add``,``and``,``shl``,``mul``,``alloca``,``store``,``br``,``load``,``icmp``,``phi``,``select``,``call``. Note that there is no need to translate Integer Coversion Instructions (``sext``,``zext``,``trunc``,etc.), because in LC-3 everything has a fixed 16-bit length. Also, this pass cannot handle any floating point instructions, because LC-3 doesn't support them. This pass is simple enough that it doesn't have the concept of stack, heap, frame, etc. It treats every LLVM IR virtual register as an address in memory arbitrarily and does no optimization.
+This is a simple LLVM pass that can translate a subset of LLVM-IR Instructions (generated from C code) into LC-3 Assembly. It supports the following LLVM-IR Instructions: ``add``,``and``,``shl``,``mul``,``alloca``,``store``,``br``,``load``,``icmp``,``phi``,``select``,``call``. Note that there is no need to translate Integer Coversion Instructions (``sext``,``zext``,``trunc``,etc.), because in LC-3 everything has a fixed 16-bit length. Also, this pass cannot handle any floating point instructions, because LC-3 doesn't support them. This pass is simple enough that it doesn't have the concept of stack, heap, frame, etc. It treats every LLVM IR virtual register as an address in memory arbitrarily and does no optimization.
 
 ## Build
 
