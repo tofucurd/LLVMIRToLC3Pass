@@ -24,7 +24,7 @@ make
 
 After you get a ``LLVMIRToLC3Pass.so`` in ``build/``, you can use it to translate the LLVM-IR file. To do so, take the ``example.c`` in this repo for example.
 
-First, compile the C source file into LLVM-IR file. Note that there must be no optimization enabled.
+First, compile the C source file into LLVM-IR file.
 
 ```
 clang example.c -O0 -S -emit-llvm -o example.ll
