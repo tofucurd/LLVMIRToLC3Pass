@@ -3,3 +3,4 @@ build/
 *.asm
 *.obj
 *.sym
+*.out

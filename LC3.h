@@ -11,11 +11,11 @@ void printCharImm(char c);
 void integrateLC3Asm(const char *ins);
 
 // load value at label into des
-void loadLabel(int *des, const char *label);
+int loadLabel(const char *label);
 // load value at addr into des
-void loadAddr(int *des, int addr);
+int loadAddr(int addr);
 // read the address of label into des
-void readLabelAddr(int *des, const char *label);
+int readLabelAddr(const char *label);
 // store value of src into label
 void storeLabel(int src, const char *label);
 // store value of src into addr

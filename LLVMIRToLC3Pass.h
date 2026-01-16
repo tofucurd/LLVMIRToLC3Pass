@@ -12,7 +12,7 @@ class LLVMIRToLC3Pass : public PassInfoMixin<LLVMIRToLC3Pass> {
 public:
   // The run() method is the entry point.
   // For a Module pass, change Function& to Module&.
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
 
   // Add this method:
   static bool isRequired() { return true; }
