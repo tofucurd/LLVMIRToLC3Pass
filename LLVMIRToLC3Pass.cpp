@@ -560,10 +560,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::PassPluginLibraryInfo llvmGetPassPluginInfo() {
           [](PassBuilder &PB) {
             // Register the callback to parse the pass name in command line
             PB.registerPipelineParsingCallback(
-                [](StringRef Name, ModulePassManager &FPM,
+                [](StringRef Name, ModulePassManager &MPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
                   if (Name == "llvm-ir-to-lc3-pass") {
-                    FPM.addPass(LLVMIRToLC3Pass());
+                    MPM.addPass(LLVMIRToLC3Pass());
                     return true;
                   }
                   return false;
