@@ -4,3 +4,4 @@ build/
 *.obj
 *.sym
 *.out
+.cache/
