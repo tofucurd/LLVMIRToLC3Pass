@@ -84,7 +84,7 @@ auto ParseError(Instruction &I) {
   errs() << "Unsupported Instruction: ";
   I.print(errs());
   errs() << "\nNo File Generated\n";
-  return PreservedAnalyses::none();
+  return PreservedAnalyses::all();
 }
 
 PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
@@ -551,7 +551,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
   errs() << "One file generated: " << TargetFileName << "\n";
 
-  return PreservedAnalyses::none();
+  return PreservedAnalyses::all();
 }
 
 extern "C" LLVM_ATTRIBUTE_WEAK ::PassPluginLibraryInfo llvmGetPassPluginInfo() {
