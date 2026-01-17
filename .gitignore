@@ -1,7 +1,8 @@
-build/
-*.ll
-*.asm
-*.obj
-*.sym
-*.out
-.cache/
+*
+!LLVMIRToLC3Pass*
+!example.c
+!LC3.h
+!CMakeLists.txt
+!README.md
+!.clang-format
+!.gitignore

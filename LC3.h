@@ -1,11 +1,11 @@
 // print the string s stored at addr
 void printStrAddr(int addr);
 // print the string s
-void printStrImm(const char *str);
+void printStr(const char *str);
 // print the char stored at addr
 void printCharAddr(int addr);
 // print the char c
-void printCharImm(char c);
+void printChar(char c);
 
 // integrate a single LC-3 assembly instruction ins (no \n)
 void integrateLC3Asm(const char *ins);

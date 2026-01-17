@@ -4,6 +4,13 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/ToolOutputFile.h"
+#include <llvm/ADT/STLExtras.h>
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/InstrTypes.h>
+#include <llvm/IR/Instruction.h>
+#include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/Intrinsics.h>
+#include <llvm/Support/Casting.h>
 
 using namespace llvm;
 
@@ -75,7 +82,7 @@ int addString(Value *Val, raw_string_ostream &ImmBuffer,
   return 0;
 }
 
-auto ParseError(Instruction &I) {
+auto UnsupportInst(Instruction &I) {
   errs() << "Unsupported Instruction: ";
   I.print(errs());
   errs() << "\nNo File Generated\n";
@@ -101,8 +108,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
            << "; R6 : stack pointer\n"
            << "; R5 : frame pointer\n"
            << "\n"
-           << "\t.ORIG\t" << LC3StartAddrArg << "\n"
-           << "\tLD\t\tR6, STACK_BASE\n";
+           << "\t.ORIG\t" << LC3StartAddrArg << "\n";
 
   DenseMap<Value *, int> BBIDMap;
   DenseMap<Function *, int> FuncIDMap;
@@ -111,15 +117,11 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
   int TempLabelCounter = 0;
 
   for (auto &F : M) {
-    StringRef FuncName = F.getName();
-    if (FuncName == "printStrAddr" || FuncName == "printStrImm" ||
-        FuncName == "printCharAddr" || FuncName == "printCharImm" ||
-        FuncName == "integrateLC3Asm" || FuncName == "loadLabel" ||
-        FuncName == "loadAddr" || FuncName == "readLabelAddr" ||
-        FuncName == "storeLabel" || FuncName == "storeAddr") {
+    if (F.isIntrinsic() || F.isDeclaration()) {
       continue;
     }
 
+    StringRef FuncName = F.getName();
     std::string FuncInstBuffer;
     raw_string_ostream FuncInstBufferStream(FuncInstBuffer);
 
@@ -132,7 +134,8 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
       if (isFirstBB) {
         if (FuncName == "main") {
-          Out.os() << "\tBR\t\tLABEL_" << BBID << "\n"
+          Out.os() << "\tLD\t\tR6, STACK_BASE\n"
+                   << "\tBR\t\tLABEL_" << BBID << "\n"
                    << "\n"
                    << "STACK_BASE\n\t.FILL\t" << LC3StackBaseArg << "\n"
                    << "\n";
@@ -150,25 +153,52 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
       DenseMap<Value *, int> ImmIDMap;
       std::string ImmBuffer;
       raw_string_ostream ImmBufferStream(ImmBuffer);
+      for (auto &I : make_early_inc_range(BB)) {
+        if (auto *IntrI = dyn_cast<IntrinsicInst>(&I)) {
+          CmpInst::Predicate Pred;
+          switch (IntrI->getIntrinsicID()) {
+          case Intrinsic::smin:
+            Pred = CmpInst::ICMP_SLT;
+            break;
+          case Intrinsic::smax:
+            Pred = CmpInst::ICMP_SGT;
+            break;
+          case Intrinsic::umin:
+            Pred = CmpInst::ICMP_ULT;
+            break;
+          case Intrinsic::umax:
+            Pred = CmpInst::ICMP_UGT;
+            break;
+          case Intrinsic::lifetime_start:
+            continue;
+          case Intrinsic::lifetime_end:
+            continue;
+          default:
+            return UnsupportInst(I);
+          }
+
+          IRBuilder<> Builder(IntrI);
+          Value *A = IntrI->getArgOperand(0);
+          Value *B = IntrI->getArgOperand(1);
+
+          Value *Cmp = Builder.CreateICmp(Pred, A, B, "minmax.cmp");
+          Value *Select = Builder.CreateSelect(Cmp, A, B, "minmax.res");
+
+          IntrI->replaceAllUsesWith(Select);
+          IntrI->eraseFromParent();
+        }
+      }
       for (auto &I : BB) {
         FuncInstBufferStream << ";";
         I.print(FuncInstBufferStream);
         FuncInstBufferStream << "\n";
         if (auto *BinI = dyn_cast<BinaryOperator>(&I)) {
-          if (BinI->getOpcode() == Instruction::Mul) {
+          auto OpCode = BinI->getOpcode();
+          if (OpCode == Instruction::Mul || OpCode == Instruction::UDiv) {
             FuncInstBufferStream << "\tAND\t\tR3, R3, #0\n";
           }
 
           int ResOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
-
-          Value *A = BinI->getOperand(0);
-          if (int AID = addImmidiate(A, ImmBufferStream, ImmFlag, ImmIDMap,
-                                     ImmIDCounter)) {
-            FuncInstBufferStream << "\tLD\t\tR1, VALUE_" << AID << "\n";
-          } else {
-            int AOff = -getIndex(A, ValueOffsetMap, ValueOffsetCounter);
-            FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << AOff << "\n";
-          }
 
           Value *B = BinI->getOperand(1);
           if (int BID = addImmidiate(B, ImmBufferStream, ImmFlag, ImmIDMap,
@@ -178,28 +208,53 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
             int BOff = -getIndex(B, ValueOffsetMap, ValueOffsetCounter);
             FuncInstBufferStream << "\tLDR\t\tR2, R5, #" << BOff << "\n";
           }
+          if (OpCode == Instruction::Sub || OpCode == Instruction::UDiv) {
+            FuncInstBufferStream << "\tNOT\t\tR2, R2\n"
+                                 << "\tADD\t\tR2, R2, #1\n";
+          } else if (OpCode == Instruction::URem) {
+            FuncInstBufferStream << "\tNOT\t\tR4, R2\n"
+                                 << "\tADD\t\tR4, R4, #1\n";
+          }
 
-          if (BinI->getOpcode() == Instruction::Add) {
+          Value *A = BinI->getOperand(0);
+          if (int AID = addImmidiate(A, ImmBufferStream, ImmFlag, ImmIDMap,
+                                     ImmIDCounter)) {
+            FuncInstBufferStream << "\tLD\t\tR1, VALUE_" << AID << "\n";
+          } else {
+            int AOff = -getIndex(A, ValueOffsetMap, ValueOffsetCounter);
+            FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << AOff << "\n";
+          }
+          switch (OpCode) {
+          case Instruction::Add:
             FuncInstBufferStream << "\tADD\t\tR1, R1, R2\n"
                                  << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
-          } else if (BinI->getOpcode() == Instruction::Sub) {
-            FuncInstBufferStream << "\tNOT\t\tR2, R2\n"
-                                 << "\tADD\t\tR2, R2, #1\n"
-                                 << "\tADD\t\tR1, R1, R2\n"
+            break;
+          case Instruction::Sub:
+            FuncInstBufferStream << "\tADD\t\tR1, R1, R2\n"
                                  << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
-          } else if (BinI->getOpcode() == Instruction::And) {
+            break;
+          case Instruction::And:
             FuncInstBufferStream << "\tAND\t\tR1, R1, R2\n"
                                  << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
-          } else if (BinI->getOpcode() == Instruction::Shl) {
-            FuncInstBufferStream << "TEMPLABEL_" << ++TempLabelCounter << "\n"
+            break;
+          case Instruction::Or:
+            FuncInstBufferStream << "\tNOT\t\tR1, R1\n"
+                                 << "\tNOT\t\tR2, R2\n"
+                                 << "\tAND\t\tR1, R1, R2\n"
+                                 << "\tNOT\t\tR1, R1\n"
+                                 << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
+            break;
+          case Instruction::Shl:
+            FuncInstBufferStream << "SHL_LOOP_" << ++TempLabelCounter << "\n"
                                  << "\tADD\t\tR1, R1, R1\n"
                                  << "\tADD\t\tR2, R2, #-1\n"
-                                 << "\tBRp\t\tTEMPLABEL_" << TempLabelCounter
+                                 << "\tBRp\t\tSHL_LOOP_" << TempLabelCounter
                                  << "\n"
                                  << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
-          } else if (BinI->getOpcode() == Instruction::Mul) {
+            break;
+          case Instruction::Mul:
             if (SignedMul) {
-              FuncInstBufferStream << "\tBRzp\tTEMPLABEL_"
+              FuncInstBufferStream << "\tBRzp\tMUL_LOOP_"
                                    << TempLabelCounter + 1 << "\n"
                                    << "\tNOT\t\tR1, R1\n"
                                    << "\tADD\t\tR1, R1, #1\n"
@@ -207,15 +262,66 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                                    << "\tADD\t\tR2, R2, #1\n";
             }
             FuncInstBufferStream
-                << "TEMPLABEL_" << ++TempLabelCounter << "\n"
-                << "\tBRz\t\tTEMPLABEL_" << ++TempLabelCounter << "\n"
+                << "MUL_LOOP_" << ++TempLabelCounter << "\n"
+                << "\tBRz\t\tMUL_END_" << TempLabelCounter << "\n"
                 << "\tADD\t\tR3, R3, R1\n"
                 << "\tADD\t\tR2, R2, #-1\n"
-                << "\tBR\t\tTEMPLABEL_" << TempLabelCounter - 1 << "\n"
-                << "TEMPLABEL_" << TempLabelCounter << "\n"
+                << "\tBR\t\tMUL_LOOP_" << TempLabelCounter << "\n"
+                << "MUL_END_" << TempLabelCounter << "\n"
                 << "\tSTR\t\tR3, R5, #" << ResOff << "\n";
-          } else {
-            return ParseError(I);
+            break;
+          case Instruction::UDiv:
+            FuncInstBufferStream
+                << "UDIV_LOOP_" << ++TempLabelCounter << "\n"
+                << "\tBRnz\tUDIV_END_" << TempLabelCounter << "\n"
+                << "\tADD\t\tR3, R3, #1\n"
+                << "\tADD\t\tR1, R1, R2\n"
+                << "\tBR\t\tUDIV_LOOP_" << TempLabelCounter << "\n"
+                << "UDIV_END_" << TempLabelCounter << "\n"
+                << "\tBRz\t\tUDIV_POST_" << TempLabelCounter << "\n"
+                << "\tADD\t\tR3, R3, #-1\n"
+                << "UDIV_POST_" << TempLabelCounter << "\n"
+                << "\tSTR\t\tR3, R5, #" << ResOff << "\n";
+            break;
+          case Instruction::URem:
+            FuncInstBufferStream
+                << "UREM_LOOP_" << ++TempLabelCounter << "\n"
+                << "\tBRnz\tUREM_END_" << TempLabelCounter << "\n"
+                << "\tADD\t\tR1, R1, R4\n"
+                << "\tBR\t\tUREM_LOOP_" << TempLabelCounter << "\n"
+                << "UREM_END_" << TempLabelCounter << "\n"
+                << "\tBRz\t\tUREM_POST_" << TempLabelCounter << "\n"
+                << "\tADD\t\tR1, R1, R2\n"
+                << "UREM_POST_" << TempLabelCounter << "\n"
+                << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
+            break;
+          case Instruction::LShr:
+            // R2: counter, R1: result, R0: temporary register
+            // R3: source mask, R4: destiny mask
+            FuncInstBufferStream
+                << "LSHR_OUT_LOOP_" << ++TempLabelCounter << "\n"
+                << "\tAND\t\tR0, R0, #0\n"
+                << "\tAND\t\tR3, R3, #0\n"
+                << "\tADD\t\tR3, R3, #2\n"
+                << "\tAND\t\tR4, R4, #0\n"
+                << "\tADD\t\tR4, R4, #1\n"
+                << "LSHR_IN_LOOP_" << TempLabelCounter << "\n"
+                << "\tNOT\t\tR4, R4\n"
+                << "\tAND\t\tR1, R1, R4\n"
+                << "\tNOT\t\tR4, R4\n"
+                << "\tAND\t\tR0, R1, R3\n"
+                << "\tBRz\t\tLSHR_SKIP_" << TempLabelCounter << "\n"
+                << "\tADD\t\tR1, R1, R4\n"
+                << "LSHR_SKIP_" << TempLabelCounter << "\n"
+                << "\tADD\t\tR3, R3, R3\n"
+                << "\tADD\t\tR4, R4, R4\n"
+                << "\tBRnp\tLSHR_IN_LOOP_" << TempLabelCounter << "\n"
+                << "\tADD\t\tR2, R2, #-1\n"
+                << "\tBRp\t\tLSHR_OUT_LOOP_" << TempLabelCounter << "\n"
+                << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
+            break;
+          default:
+            return UnsupportInst(I);
           }
         } else if (auto *LoadI = dyn_cast<LoadInst>(&I)) {
           int ResOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
@@ -293,60 +399,60 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
           switch (ICmpI->getPredicate()) {
           case CmpInst::ICMP_EQ:
-            FuncInstBufferStream << "\tBRnp\tTEMPLABEL_" << ++TempLabelCounter
+            FuncInstBufferStream << "\tBRnp\tICMP_END_" << ++TempLabelCounter
                                  << "\n";
             break;
           case CmpInst::ICMP_NE:
-            FuncInstBufferStream << "\tBRz\t\tTEMPLABEL_" << ++TempLabelCounter
+            FuncInstBufferStream << "\tBRz\t\tICMP_END_" << ++TempLabelCounter
                                  << "\n";
             break;
           case CmpInst::ICMP_SGT:
-            FuncInstBufferStream << "\tBRnz\tTEMPLABEL_" << ++TempLabelCounter
+            FuncInstBufferStream << "\tBRnz\tICMP_END_" << ++TempLabelCounter
                                  << "\n";
             break;
           case CmpInst::ICMP_SGE:
-            FuncInstBufferStream << "\tBRn\t\tTEMPLABEL_" << ++TempLabelCounter
+            FuncInstBufferStream << "\tBRn\t\tICMP_END_" << ++TempLabelCounter
                                  << "\n";
             break;
           case CmpInst::ICMP_SLT:
-            FuncInstBufferStream << "\tBRzp\tTEMPLABEL_" << ++TempLabelCounter
+            FuncInstBufferStream << "\tBRzp\tICMP_END_" << ++TempLabelCounter
                                  << "\n";
             break;
           case CmpInst::ICMP_SLE:
-            FuncInstBufferStream << "\tBRp\t\tTEMPLABEL_" << ++TempLabelCounter
+            FuncInstBufferStream << "\tBRp\t\tICMP_END_" << ++TempLabelCounter
                                  << "\n";
             break;
           case CmpInst::ICMP_UGT:
-            FuncInstBufferStream << "\tBRnz\tTEMPLABEL_" << ++TempLabelCounter
+            FuncInstBufferStream << "\tBRnz\tICMP_END_" << ++TempLabelCounter
                                  << "\n";
             break;
           case CmpInst::ICMP_UGE:
-            FuncInstBufferStream << "\tBRn\t\tTEMPLABEL_" << ++TempLabelCounter
+            FuncInstBufferStream << "\tBRn\t\tICMP_END_" << ++TempLabelCounter
                                  << "\n";
             break;
           case CmpInst::ICMP_ULT:
-            FuncInstBufferStream << "\tBRzp\tTEMPLABEL_" << ++TempLabelCounter
+            FuncInstBufferStream << "\tBRzp\tICMP_END_" << ++TempLabelCounter
                                  << "\n";
             break;
           case CmpInst::ICMP_ULE:
-            FuncInstBufferStream << "\tBRp\t\tTEMPLABEL_" << ++TempLabelCounter
+            FuncInstBufferStream << "\tBRp\t\tICMP_END_" << ++TempLabelCounter
                                  << "\n";
             break;
           default:
-            return ParseError(I);
+            return UnsupportInst(I);
           }
 
           FuncInstBufferStream << "\tADD\t\tR3, R3, #1\n"
-                               << "TEMPLABEL_" << TempLabelCounter << "\n"
+                               << "ICMP_END_" << TempLabelCounter << "\n"
                                << "\tSTR\t\tR3, R5, #" << ResOff << "\n";
         } else if (auto *CallI = dyn_cast<CallInst>(&I)) {
           if (Function *Func = CallI->getCalledFunction()) {
-            if (Func->getName() == "printStrImm") {
+            if (Func->getName() == "printStr") {
               if (CallI->arg_size() == 1) {
                 Value *Str = CallI->getArgOperand(0);
 
-                if (int StrID = addImmidiate(Str, ImmBufferStream, ImmFlag,
-                                             ImmIDMap, ImmIDCounter)) {
+                if (int StrID = addString(Str, ImmBufferStream, ImmFlag,
+                                          ImmIDMap, ImmIDCounter)) {
                   FuncInstBufferStream << "\tLEA\t\tR0, VALUE_" << StrID
                                        << "\n";
                 } else {
@@ -358,7 +464,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
                 FuncInstBufferStream << "\tPUTS\n";
               } else {
-                return ParseError(I);
+                return UnsupportInst(I);
               }
             } else if (Func->getName() == "printStrAddr") {
               if (CallI->arg_size() == 1) {
@@ -376,7 +482,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
                 FuncInstBufferStream << "\tPUTS\n";
               } else {
-                return ParseError(I);
+                return UnsupportInst(I);
               }
             } else if (Func->getName() == "printCharAddr") {
               if (CallI->arg_size() == 1) {
@@ -395,9 +501,9 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                 FuncInstBufferStream << "\tLDR\t\tR0, R1, #0\n"
                                      << "\tOUT\n";
               } else {
-                return ParseError(I);
+                return UnsupportInst(I);
               }
-            } else if (Func->getName() == "printCharImm") {
+            } else if (Func->getName() == "printChar") {
               if (CallI->arg_size() == 1) {
                 Value *Char = CallI->getArgOperand(0);
                 if (int CharID = addImmidiate(Char, ImmBufferStream, ImmFlag,
@@ -413,7 +519,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
                 FuncInstBufferStream << "\tOUT\n";
               } else {
-                return ParseError(I);
+                return UnsupportInst(I);
               }
             } else if (Func->getName() == "integrateLC3Asm") {
               if (CallI->arg_size() == 1) {
@@ -422,10 +528,10 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                 if (Content != "") {
                   FuncInstBufferStream << Content << "\n";
                 } else {
-                  return ParseError(I);
+                  return UnsupportInst(I);
                 }
               } else {
-                return ParseError(I);
+                return UnsupportInst(I);
               }
             } else if (Func->getName() == "loadLabel") {
               if (CallI->arg_size() == 1) {
@@ -439,10 +545,10 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                                        << "\tSTR\t\tR1, R5, #" << DesOff
                                        << "\n";
                 } else {
-                  return ParseError(I);
+                  return UnsupportInst(I);
                 }
               } else {
-                return ParseError(I);
+                return UnsupportInst(I);
               }
             } else if (Func->getName() == "loadAddr") {
               if (CallI->arg_size() == 1) {
@@ -463,7 +569,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                 FuncInstBufferStream << "\tLDR\t\tR1, R1, #0\n"
                                      << "\tSTR\t\tR1, R5, #" << DesOff << "\n";
               } else {
-                return ParseError(I);
+                return UnsupportInst(I);
               }
             } else if (Func->getName() == "storeLabel") {
               if (CallI->arg_size() == 2) {
@@ -477,10 +583,10 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                   FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << SrcOff << "\n"
                                        << "\tST\t\tR1, " << Label << "\n";
                 } else {
-                  return ParseError(I);
+                  return UnsupportInst(I);
                 }
               } else {
-                return ParseError(I);
+                return UnsupportInst(I);
               }
             } else if (Func->getName() == "storeAddr") {
               if (CallI->arg_size() == 2) {
@@ -501,7 +607,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                                        << "\tSTR\t\tR1, R2, #0";
                 }
               } else {
-                return ParseError(I);
+                return UnsupportInst(I);
               }
             } else if (Func->getName() == "readLabelAddr") {
               if (CallI->arg_size() == 1) {
@@ -515,10 +621,10 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                                        << "\tSTR\t\tR1, R5, #" << DesOff
                                        << "\n";
                 } else {
-                  return ParseError(I);
+                  return UnsupportInst(I);
                 }
               } else {
-                return ParseError(I);
+                return UnsupportInst(I);
               }
             } else if (CallI->arg_size() <= 5 && FuncIDMap.count(Func)) {
               int FuncID = FuncIDMap[Func];
@@ -550,10 +656,10 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                 }
               }
             } else {
-              return ParseError(I);
+              return UnsupportInst(I);
             }
           } else {
-            return ParseError(I);
+            return UnsupportInst(I);
           }
         } else if (auto *AllocaI = dyn_cast<AllocaInst>(&I)) {
           continue;
@@ -571,7 +677,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
             FuncInstBufferStream << "\tLEA\t\tR1, LABEL_" << SrcBBID << "\n"
                                  << "\tADD\t\tR1, R1, R2\n"
-                                 << "\tBRnp\tTEMPLABEL_" << ++TempLabelCounter
+                                 << "\tBRnp\tPHI_NEXT_" << ++TempLabelCounter
                                  << "\n";
 
             Value *Val = PHIN->getIncomingValue(i);
@@ -585,13 +691,15 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
             FuncInstBufferStream << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
             if (i < ArgSize - 1) {
-              FuncInstBufferStream << "\tBR\t\tTEMPLABEL_" << EndLableID
-                                   << "\n";
+              FuncInstBufferStream << "\tBR\t\tPHI_NEXT_" << EndLableID << "\n";
             }
-            FuncInstBufferStream << "TEMPLABEL_" << TempLabelCounter << "\n";
+            FuncInstBufferStream << "PHI_NEXT_" << TempLabelCounter << "\n";
           }
         } else if (auto *RetI = dyn_cast<ReturnInst>(&I)) {
+          FuncInstBufferStream << "RETURN_" << BBID << "\n";
+          bool hasRetVal = false;
           if (Value *Val = RetI->getReturnValue()) {
+            hasRetVal = true;
             if (int ValID = addImmidiate(Val, ImmBufferStream, ImmFlag,
                                          ImmIDMap, ImmIDCounter)) {
               FuncInstBufferStream << "\tLD\t\tR0, VALUE_" << ValID << "\n";
@@ -600,18 +708,28 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
               FuncInstBufferStream << "\tLDR\t\tR0, R5, #" << ValOff << "\n";
             }
           }
-          FuncInstBufferStream << "; restore R5, R6, R7\n";
-          FuncInstBufferStream << "\tADD\t\tR6, R5, #0\n";
-          FuncInstBufferStream << "\tLDR\t\tR5, R6, #0\n"
-                               << "\tADD\t\tR6, R6, #1\n";
-          FuncInstBufferStream << "\tLDR\t\tR7, R6, #0\n"
-                               << "\tADD\t\tR6, R6, #1\n";
+          FuncInstBufferStream << "; restore registers\n";
+          FuncInstBufferStream << "\tADD\t\tR6, R5, #0\n"
+                               << "\tLDR\t\tR5, R6, #0\n"
+                               << "\tLDR\t\tR7, R6, #1\n"
+                               << "\tLDR\t\tR4, R6, #2\n"
+                               << "\tLDR\t\tR3, R6, #3\n"
+                               << "\tLDR\t\tR2, R6, #4\n"
+                               << "\tLDR\t\tR1, R6, #5\n"
+                               << "\tADD\t\tR6, R6, #7\n";
+          if (!hasRetVal) {
+            FuncInstBufferStream << "\tLDR\t\tR0, R6, #-1\n";
+          }
           FuncInstBufferStream << "\tRET\n";
           continue;
-        } else if (I.getOpcode() == Instruction::ZExt ||
-                   I.getOpcode() == Instruction::SExt ||
-                   I.getOpcode() == Instruction::Trunc) {
-          continue;
+        } else if (auto *CastI = dyn_cast<CastInst>(&I)) {
+          int ResOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
+
+          Value *Op = CastI->getOperand(0);
+          int OpOff = -getIndex(Op, ValueOffsetMap, ValueOffsetCounter);
+
+          FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << OpOff << "\n"
+                               << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
         } else if (auto *SelI = dyn_cast<SelectInst>(&I)) {
           int ResOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
 
@@ -629,7 +747,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
           }
 
           FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << CondOff << "\n"
-                               << "\tBRp\t\tTEMPLABEL_" << ++TempLabelCounter
+                               << "\tBRp\t\tSELECT_END_" << ++TempLabelCounter
                                << "\n";
 
           Value *IfFalse = SelI->getFalseValue();
@@ -642,31 +760,35 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
             FuncInstBufferStream << "\tLDR\t\tR2, R5, #" << IfFalseOff << "\n";
           }
 
-          FuncInstBufferStream << "TEMPLABEL_" << TempLabelCounter << "\n"
+          FuncInstBufferStream << "SELECT_END_" << TempLabelCounter << "\n"
                                << "\tSTR\t\tR2, R5, #" << ResOff << "\n";
         } else {
-          return ParseError(I);
+          return UnsupportInst(I);
         }
       }
 
       FuncInstBufferStream << "\n";
       if (!ImmBuffer.empty()) {
-        FuncInstBufferStream << "; static value section for LABEL_" << BBID
-                             << "\n"
+        FuncInstBufferStream << "; constant section for LABEL_" << BBID << "\n"
                              << ImmBufferStream.str() << "\n";
       }
     }
 
     InstBufferStream << "; function " << FuncName << "\n";
-    InstBufferStream << "; local variable count: " << ValueOffsetCounter << "\n";
+    InstBufferStream << "; local variable count: " << ValueOffsetCounter
+                     << "\n";
     InstBufferStream << "LABEL_" << FuncIDMap[&F] << "\n";
-    InstBufferStream << "; init R6, R5, store old R5, R7\n";
-    InstBufferStream << "\tADD\t\tR6, R6, #-1\n"
-                     << "\tSTR\t\tR7, R6, #0\n";
-    InstBufferStream << "\tADD\t\tR6, R6, #-1\n"
-                     << "\tSTR\t\tR5, R6, #0\n";
-    InstBufferStream << "\tADD\t\tR5, R6, #0\n";
-    if (ValueOffsetCounter < 32) {
+    InstBufferStream << "; init R6, R5, save old registers\n";
+    InstBufferStream << "\tADD\t\tR6, R6, #-7\n"
+                     << "\tSTR\t\tR0, R6, #6\n"
+                     << "\tSTR\t\tR1, R6, #5\n"
+                     << "\tSTR\t\tR2, R6, #4\n"
+                     << "\tSTR\t\tR3, R6, #3\n"
+                     << "\tSTR\t\tR4, R6, #2\n"
+                     << "\tSTR\t\tR7, R6, #1\n"
+                     << "\tSTR\t\tR5, R6, #0\n"
+                     << "\tADD\t\tR5, R6, #0\n";
+    if (ValueOffsetCounter <= 32) {
       if (ValueOffsetCounter > 16) {
         InstBufferStream << "\tADD\t\tR6, R6, #-16\n";
         ValueOffsetCounter -= 16;

@@ -2,11 +2,10 @@
 
 ## Introduction
 
-This is a simple LLVM pass that can translate a subset of LLVM-IR Instructions (generated from C code) into LC-3 Assembly. It supports the following LLVM-IR Instructions: ``add``,``and``,``shl``,``mul``,``alloca``,``store``,``br``,``load``,``icmp``,``phi``,``select``,``call``. 
+This is a simple LLVM pass that can translate a subset of LLVM-IR Instructions (generated from C code) into LC-3 Assembly. It supports the following LLVM-IR Instructions: ``add``,``and``,``shl``,``mul``,``alloca``,``store``,``br``,``load``,``icmp``,``phi``,``select``,``call``,``udiv``,``urem``,``lshr``.
 
 Note that:
 - This pass uses R6 as the stack pointer, R5 as the frame pointer and R7 as PC saver.
-- There is no translation for Integer Coversion Instructions (``sext``,``zext``,``trunc``,etc.), because in LC-3 everything has a fixed 16-bit length.
 - This pass treats every unsigned number as signed.
 - This pass cannot handle any floating point instructions, because LC-3 doesn't support them.
 - It treats every LLVM IR virtual register as an address in memory arbitrarily and does no optimization.
@@ -60,7 +59,7 @@ opt -load-pass-plugin=build/LLVMIRToLC3Pass.so \
 
 If you get error message ``Unsupported instruction: <LLVM IR Inst>``, then it means you must change your code to fit the pass.
 
-If you get error message ``Too many local variables: <Count>``, then it means the count of the local variable exceeded the max count LC-3 ISA support. You can compile the origin C code with a higher optimization level to try to solve this problem.
+If you get error message ``Too many local variables: <Count>``, then it means the count of the local variable exceeded the max count LC-3 ISA support. You can compile the origin C code with a higher optimization level to try to solve this problem. Or, you can try to split a long function into several small functions.
 
 If there is no error, you will get a ``.asm`` file that can be recognized by ``lc3as``.
 
