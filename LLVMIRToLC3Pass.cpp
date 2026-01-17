@@ -24,34 +24,42 @@ using namespace llvm;
 
 static cl::opt<std::string>
     LC3StartAddrArg("lc3-start-addr",
-                    cl::desc("Specify the starting address of the LC-3 "
+                    cl::desc("Specify the starting address of LC-3 "
                              "assembly file, default x3000"),
                     cl::value_desc("lc3-start-addr"), cl::init("x3000"));
+
+static cl::opt<std::string>
+    LC3StackBaseArg("lc3-stack-base",
+                    cl::desc("Specify the base address of the stack in LC-3 "
+                             "assembly file, default xFE00"),
+                    cl::value_desc("lc3-stack-base"), cl::init("xFE00"));
 
 static cl::opt<bool>
     SignedMul("signed-mul",
               cl::desc("use signed multiplication or not, default false"),
               cl::value_desc("signed-mul"), cl::init(false));
 
-int getID(Value *Val, DenseMap<Value *, int> &Map, int &Counter) {
+int getIndex(Value *Val, DenseMap<Value *, int> &Map, int &Counter) {
   if (Map.count(Val) == 0) {
     Map[Val] = ++Counter;
   }
   return Map[Val];
 }
 
-bool addImmidiate(Value *Val, int ValID, raw_string_ostream &Buffer,
-                  DenseMap<Value *, bool> &Flag) {
+int addImmidiate(Value *Val, raw_string_ostream &ImmBuffer,
+                 DenseMap<Value *, bool> &ImmFlag,
+                 DenseMap<Value *, int> &ImmMap, int &ImmCounter) {
   if (auto *ConstInt = dyn_cast<ConstantInt>(Val)) {
-    if (!Flag.count(Val)) {
-      Flag[Val] = true;
+    int ValID = getIndex(Val, ImmMap, ImmCounter);
+    if (!ImmFlag.count(Val)) {
+      ImmFlag[Val] = true;
       int value = ConstInt->getSExtValue();
-      Buffer << "VALUE_" << ValID << "\n"
-             << "\t.FILL\t#" << value << "\n";
+      ImmBuffer << "VALUE_" << ValID << "\n"
+                << "\t.FILL\t#" << value << "\n";
     }
-    return true;
+    return ValID;
   }
-  return false;
+  return 0;
 }
 
 StringRef getString(Value *Val) {
@@ -66,18 +74,20 @@ StringRef getString(Value *Val) {
   return StringRef("").rtrim('\0');
 }
 
-bool addString(Value *Val, int ValID, raw_string_ostream &Buffer,
-               DenseMap<Value *, bool> &Flag) {
+int addString(Value *Val, raw_string_ostream &ImmBuffer,
+              DenseMap<Value *, bool> &ImmFlag, DenseMap<Value *, int> &ImmMap,
+              int &ImmCounter) {
   auto Str = getString(Val);
   if (Str.size() > 0) {
-    if (!Flag.count(Val)) {
-      Flag[Val] = true;
-      Buffer << "VALUE_" << ValID << "\n"
-             << "\t.STRINGZ\t\"" << Str << "\"\n";
+    int ValID = getIndex(Val, ImmMap, ImmCounter);
+    if (!ImmFlag.count(Val)) {
+      ImmFlag[Val] = true;
+      ImmBuffer << "VALUE_" << ValID << "\n"
+                << "\t.STRINGZ\t\"" << Str << "\"\n";
     }
-    return true;
+    return ValID;
   }
-  return false;
+  return 0;
 }
 
 auto ParseError(Instruction &I) {
@@ -93,9 +103,8 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
   std::error_code EC;
   ToolOutputFile Out(TargetFileName, EC, sys::fs::OF_None);
-  std::string AllocateBuffer, InstBuffer;
-  raw_string_ostream AllocateBufferStream(AllocateBuffer),
-      InstBufferStream(InstBuffer);
+  std::string InstBuffer;
+  raw_string_ostream InstBufferStream(InstBuffer);
 
   if (EC) {
     errs() << "Error: " << EC.message() << "\n";
@@ -104,252 +113,320 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
   Out.os() << "; This file is generated automatically by ir-to-lc3 pass.\n"
            << "\n"
+           << "; R6 : stack pointer\n"
+           << "; R5 : frame pointer\n"
+           << "\n"
            << "\t.ORIG\t" << LC3StartAddrArg << "\n"
-           << "\n";
+           << "\tLD\t\tR6, STACK_BASE\n";
 
-  DenseMap<Value *, int> BBIDMap, ValueIDMap;
+  DenseMap<Value *, int> BBIDMap;
   DenseMap<Function *, int> FuncIDMap;
-  DenseMap<Value *, bool> AllocatedFlag;
   int BBIDCounter = 0;
+  int ImmIDCounter = 0;
   int TempLabelCounter = 0;
-  int ValueIDCounter = 0;
 
   for (auto &F : M) {
+    StringRef FuncName = F.getName();
+    if (FuncName == "printStrAddr" || FuncName == "printStrImm" ||
+        FuncName == "printCharAddr" || FuncName == "printCharImm" ||
+        FuncName == "integrateLC3Asm" || FuncName == "loadLabel" ||
+        FuncName == "loadAddr" || FuncName == "readLabelAddr" ||
+        FuncName == "storeLabel" || FuncName == "storeAddr") {
+      continue;
+    }
 
-    InstBufferStream << "; function " << F.getName() << "\n";
+    std::string FuncInstBuffer;
+    raw_string_ostream FuncInstBufferStream(FuncInstBuffer);
+
+    DenseMap<Value *, int> ValueOffsetMap;
+    int ValueOffsetCounter = 0;
 
     bool isFirstBB = true;
     for (auto &BB : F) {
-      int BBID = getID(&BB, BBIDMap, BBIDCounter);
-      InstBufferStream << "LABEL_" << BBID << "\n";
+      int BBID = getIndex(&BB, BBIDMap, BBIDCounter);
 
       if (isFirstBB) {
-        if (F.getName() == "main") {
-          Out.os() << "\tBR\t\tLABEL_" << BBID << "\n";
+        if (FuncName == "main") {
+          Out.os() << "\tBR\t\tLABEL_" << BBID << "\n"
+                   << "\n"
+                   << "STACK_BASE\n\t.FILL\t" << LC3StackBaseArg << "\n"
+                   << "\n";
         }
         FuncIDMap[&F] = BBID;
-        if (int argSize = F.arg_size()) {
-          for (int i = 0; i < argSize; i++) {
-            Value *Arg = F.getArg(i);
-            int ArgID = getID(Arg, ValueIDMap, ValueIDCounter);
-            InstBufferStream << "\tST\t\tR" << i << ", VALUE_" << ArgID << "\n";
-          }
-        }
         isFirstBB = false;
+      } else {
+        FuncInstBufferStream << ";  ";
+        BB.printAsOperand(FuncInstBufferStream);
+        FuncInstBufferStream << "\n";
+        FuncInstBufferStream << "LABEL_" << BBID << "\n";
       }
 
+      DenseMap<Value *, bool> ImmFlag;
+      DenseMap<Value *, int> ImmIDMap;
+      std::string ImmBuffer;
+      raw_string_ostream ImmBufferStream(ImmBuffer);
       for (auto &I : BB) {
-        InstBufferStream << ";";
-        I.print(InstBufferStream);
-        InstBufferStream << "\n";
+        FuncInstBufferStream << ";";
+        I.print(FuncInstBufferStream);
+        FuncInstBufferStream << "\n";
         if (auto *BinI = dyn_cast<BinaryOperator>(&I)) {
-          int ResID = getID(&I, ValueIDMap, ValueIDCounter);
+          if (BinI->getOpcode() == Instruction::Mul) {
+            FuncInstBufferStream << "\tAND\t\tR3, R3, #0\n";
+          }
+
+          int ResOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
 
           Value *A = BinI->getOperand(0);
-          int AID = getID(A, ValueIDMap, ValueIDCounter);
-          addImmidiate(A, AID, AllocateBufferStream, AllocatedFlag);
+          if (int AID = addImmidiate(A, ImmBufferStream, ImmFlag, ImmIDMap,
+                                     ImmIDCounter)) {
+            FuncInstBufferStream << "\tLD\t\tR1, VALUE_" << AID << "\n";
+          } else {
+            int AOff = -getIndex(A, ValueOffsetMap, ValueOffsetCounter);
+            FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << AOff << "\n";
+          }
 
           Value *B = BinI->getOperand(1);
-          int BID = getID(B, ValueIDMap, ValueIDCounter);
-          addImmidiate(B, BID, AllocateBufferStream, AllocatedFlag);
+          if (int BID = addImmidiate(B, ImmBufferStream, ImmFlag, ImmIDMap,
+                                     ImmIDCounter)) {
+            FuncInstBufferStream << "\tLD\t\tR2, VALUE_" << BID << "\n";
+          } else {
+            int BOff = -getIndex(B, ValueOffsetMap, ValueOffsetCounter);
+            FuncInstBufferStream << "\tLDR\t\tR2, R5, #" << BOff << "\n";
+          }
 
           if (BinI->getOpcode() == Instruction::Add) {
-            InstBufferStream << "\tLD\t\tR1, VALUE_" << AID << "\n"
-                             << "\tLD\t\tR2, VALUE_" << BID << "\n"
-                             << "\tADD\t\tR1, R1, R2\n"
-                             << "\tST\t\tR1, VALUE_" << ResID << "\n";
+            FuncInstBufferStream << "\tADD\t\tR1, R1, R2\n"
+                                 << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
           } else if (BinI->getOpcode() == Instruction::Sub) {
-            InstBufferStream << "\tLD\t\tR1, VALUE_" << AID << "\n"
-                             << "\tLD\t\tR2, VALUE_" << BID << "\n"
-                             << "\tNOT\t\tR2, R2\n"
-                             << "\tADD\t\tR2, R2, #1\n"
-                             << "\tADD\t\tR1, R1, R2\n"
-                             << "\tST\t\tR1, VALUE_" << ResID << "\n";
+            FuncInstBufferStream << "\tNOT\t\tR2, R2\n"
+                                 << "\tADD\t\tR2, R2, #1\n"
+                                 << "\tADD\t\tR1, R1, R2\n"
+                                 << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
           } else if (BinI->getOpcode() == Instruction::And) {
-            InstBufferStream << "\tLD\t\tR1, VALUE_" << AID << "\n"
-                             << "\tLD\t\tR2, VALUE_" << BID << "\n"
-                             << "\tAND\t\tR1, R1, R2\n"
-                             << "\tST\t\tR1, VALUE_" << ResID << "\n";
+            FuncInstBufferStream << "\tAND\t\tR1, R1, R2\n"
+                                 << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
           } else if (BinI->getOpcode() == Instruction::Shl) {
-            InstBufferStream << "\tLD\t\tR1, VALUE_" << AID << "\n"
-                             << "\tLD\t\tR2, VALUE_" << BID << "\n"
-                             << "TEMPLABEL_" << ++TempLabelCounter << "\n"
-                             << "\tADD\t\tR1, R1, R1\n"
-                             << "\tADD\t\tR2, R2, #-1\n"
-                             << "\tBRp\t\tTEMPLABEL_" << TempLabelCounter
-                             << "\n"
-                             << "\tST\t\tR1, VALUE_" << ResID << "\n";
+            FuncInstBufferStream << "TEMPLABEL_" << ++TempLabelCounter << "\n"
+                                 << "\tADD\t\tR1, R1, R1\n"
+                                 << "\tADD\t\tR2, R2, #-1\n"
+                                 << "\tBRp\t\tTEMPLABEL_" << TempLabelCounter
+                                 << "\n"
+                                 << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
           } else if (BinI->getOpcode() == Instruction::Mul) {
-            InstBufferStream << "\tAND\t\tR3, R3, #0\n"
-                             << "\tLD\t\tR1, VALUE_" << AID << "\n"
-                             << "\tLD\t\tR2, VALUE_" << BID << "\n";
             if (SignedMul) {
-              InstBufferStream << "\tBRzp\tTEMPLABEL_" << TempLabelCounter + 1
-                               << "\n"
-                               << "\tNOT\t\tR1, R1\n"
-                               << "\tADD\t\tR1, R1, #1\n"
-                               << "\tNOT\t\tR2, R2\n"
-                               << "\tADD\t\tR2, R2, #1\n";
+              FuncInstBufferStream << "\tBRzp\tTEMPLABEL_"
+                                   << TempLabelCounter + 1 << "\n"
+                                   << "\tNOT\t\tR1, R1\n"
+                                   << "\tADD\t\tR1, R1, #1\n"
+                                   << "\tNOT\t\tR2, R2\n"
+                                   << "\tADD\t\tR2, R2, #1\n";
             }
-            InstBufferStream
+            FuncInstBufferStream
                 << "TEMPLABEL_" << ++TempLabelCounter << "\n"
                 << "\tBRz\t\tTEMPLABEL_" << ++TempLabelCounter << "\n"
                 << "\tADD\t\tR3, R3, R1\n"
                 << "\tADD\t\tR2, R2, #-1\n"
                 << "\tBR\t\tTEMPLABEL_" << TempLabelCounter - 1 << "\n"
                 << "TEMPLABEL_" << TempLabelCounter << "\n"
-                << "\tST\t\tR3, VALUE_" << ResID << "\n";
+                << "\tSTR\t\tR3, R5, #" << ResOff << "\n";
           } else {
             return ParseError(I);
           }
         } else if (auto *LoadI = dyn_cast<LoadInst>(&I)) {
-          int ResID = getID(&I, ValueIDMap, ValueIDCounter);
+          int ResOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
 
           Value *Op = LoadI->getPointerOperand();
-          int OpID = getID(Op, ValueIDMap, ValueIDCounter);
+          int OpOff = -getIndex(Op, ValueOffsetMap, ValueOffsetCounter);
 
-          InstBufferStream << "\tLD\t\tR1, VALUE_" << OpID << "\n"
-                           << "\tST\t\tR1, VALUE_" << ResID << "\n";
+          FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << OpOff << "\n"
+                               << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
         } else if (auto *StoreI = dyn_cast<StoreInst>(&I)) {
           Value *Val = StoreI->getValueOperand();
-          int ValID = getID(Val, ValueIDMap, ValueIDCounter);
-          addImmidiate(Val, ValID, AllocateBufferStream, AllocatedFlag);
+          if (int ValID = addImmidiate(Val, ImmBufferStream, ImmFlag, ImmIDMap,
+                                       ImmIDCounter)) {
+            FuncInstBufferStream << "\tLD\t\tR1, VALUE_" << ValID << "\n";
+          } else {
+            int ValOff = -getIndex(Val, ValueOffsetMap, ValueOffsetCounter);
+            FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << ValOff << "\n";
+          }
 
           Value *Ptr = StoreI->getPointerOperand();
-          int PtrID = getID(Ptr, ValueIDMap, ValueIDCounter);
+          int PtrOff = -getIndex(Ptr, ValueOffsetMap, ValueOffsetCounter);
 
-          InstBufferStream << "\tLD\t\tR1, VALUE_" << ValID << "\n"
-                           << "\tST\t\tR1, VALUE_" << PtrID << "\n";
+          FuncInstBufferStream << "\tSTR\t\tR1, R5, #" << PtrOff << "\n";
         } else if (auto *BranchI = dyn_cast<BranchInst>(&I)) {
-          InstBufferStream << "\tLEA\t\tR6, LABEL_" << BBID << "\n";
+          FuncInstBufferStream << "\tLEA\t\tR7, LABEL_" << BBID << "\n";
           if (BranchI->isUnconditional()) {
             Value *Suc = BranchI->getSuccessor(0);
-            int SucID = getID(Suc, BBIDMap, BBIDCounter);
+            int SucID = getIndex(Suc, BBIDMap, BBIDCounter);
 
-            InstBufferStream << "\tBR\t\tLABEL_" << SucID << "\n";
+            FuncInstBufferStream << "\tBR\t\tLABEL_" << SucID << "\n";
           } else {
             Value *Con = BranchI->getCondition();
-            int ConID = getID(Con, ValueIDMap, ValueIDCounter);
+            if (int ConID = addImmidiate(Con, ImmBufferStream, ImmFlag,
+                                         ImmIDMap, ImmIDCounter)) {
+              FuncInstBufferStream << "\tLD\t\tR1, VALUE_" << ConID << "\n";
+            } else {
+              int ConOff = -getIndex(Con, ValueOffsetMap, ValueOffsetCounter);
+              FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << ConOff << "\n";
+            }
 
             Value *IfTrue = BranchI->getSuccessor(0);
-            int IfTrueID = getID(IfTrue, BBIDMap, BBIDCounter);
+            int IfTrueID = getIndex(IfTrue, BBIDMap, BBIDCounter);
 
             Value *IfFalse = BranchI->getSuccessor(1);
-            int IfFalseID = getID(IfFalse, BBIDMap, BBIDCounter);
+            int IfFalseID = getIndex(IfFalse, BBIDMap, BBIDCounter);
 
-            InstBufferStream << "\tLD\t\tR1, VALUE_" << ConID << "\n"
-                             << "\tBRz\t\tLABEL_" << IfFalseID << "\n"
-                             << "\tBR\t\tLABEL_" << IfTrueID << "\n";
+            FuncInstBufferStream << "\tBRz\t\tLABEL_" << IfFalseID << "\n"
+                                 << "\tBR\t\tLABEL_" << IfTrueID << "\n";
           }
         } else if (auto *ICmpI = dyn_cast<ICmpInst>(&I)) {
-          int ResID = getID(&I, ValueIDMap, ValueIDCounter);
+          int ResOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
 
           Value *A = ICmpI->getOperand(0);
-          int AID = getID(A, ValueIDMap, ValueIDCounter);
-          addImmidiate(A, AID, AllocateBufferStream, AllocatedFlag);
+          if (int AID = addImmidiate(A, ImmBufferStream, ImmFlag, ImmIDMap,
+                                     ImmIDCounter)) {
+            FuncInstBufferStream << "\tLD\t\tR1, VALUE_" << AID << "\n";
+          } else {
+            int AOff = -getIndex(A, ValueOffsetMap, ValueOffsetCounter);
+            FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << AOff << "\n";
+          }
 
           Value *B = ICmpI->getOperand(1);
-          int BID = getID(B, ValueIDMap, ValueIDCounter);
-          addImmidiate(B, BID, AllocateBufferStream, AllocatedFlag);
+          if (int BID = addImmidiate(B, ImmBufferStream, ImmFlag, ImmIDMap,
+                                     ImmIDCounter)) {
+            FuncInstBufferStream << "\tLD\t\tR2, VALUE_" << BID << "\n";
+          } else {
+            int BOff = -getIndex(B, ValueOffsetMap, ValueOffsetCounter);
+            FuncInstBufferStream << "\tLDR\t\tR2, R5, #" << BOff << "\n";
+          }
 
-          InstBufferStream << "\tAND\t\tR3, R3, #0\n"
-                           << "\tLD\t\tR1, VALUE_" << AID << "\n"
-                           << "\tLD\t\tR2, VALUE_" << BID << "\n"
-                           << "\tNOT\t\tR2, R2\n"
-                           << "\tADD\t\tR2, R2, #1\n"
-                           << "\tADD\t\tR1, R1, R2\n";
+          FuncInstBufferStream << "\tAND\t\tR3, R3, #0\n"
+                               << "\tNOT\t\tR2, R2\n"
+                               << "\tADD\t\tR2, R2, #1\n"
+                               << "\tADD\t\tR1, R1, R2\n";
 
           switch (ICmpI->getPredicate()) {
           case CmpInst::ICMP_EQ:
-            InstBufferStream << "\tBRnp\tTEMPLABEL_" << ++TempLabelCounter
-                             << "\n";
+            FuncInstBufferStream << "\tBRnp\tTEMPLABEL_" << ++TempLabelCounter
+                                 << "\n";
             break;
           case CmpInst::ICMP_NE:
-            InstBufferStream << "\tBRz\t\tTEMPLABEL_" << ++TempLabelCounter
-                             << "\n";
+            FuncInstBufferStream << "\tBRz\t\tTEMPLABEL_" << ++TempLabelCounter
+                                 << "\n";
             break;
           case CmpInst::ICMP_SGT:
-            InstBufferStream << "\tBRnz\tTEMPLABEL_" << ++TempLabelCounter
-                             << "\n";
+            FuncInstBufferStream << "\tBRnz\tTEMPLABEL_" << ++TempLabelCounter
+                                 << "\n";
             break;
           case CmpInst::ICMP_SGE:
-            InstBufferStream << "\tBRn\t\tTEMPLABEL_" << ++TempLabelCounter
-                             << "\n";
+            FuncInstBufferStream << "\tBRn\t\tTEMPLABEL_" << ++TempLabelCounter
+                                 << "\n";
             break;
           case CmpInst::ICMP_SLT:
-            InstBufferStream << "\tBRzp\tTEMPLABEL_" << ++TempLabelCounter
-                             << "\n";
+            FuncInstBufferStream << "\tBRzp\tTEMPLABEL_" << ++TempLabelCounter
+                                 << "\n";
             break;
           case CmpInst::ICMP_SLE:
-            InstBufferStream << "\tBRp\t\tTEMPLABEL_" << ++TempLabelCounter
-                             << "\n";
+            FuncInstBufferStream << "\tBRp\t\tTEMPLABEL_" << ++TempLabelCounter
+                                 << "\n";
             break;
           case CmpInst::ICMP_UGT:
-            InstBufferStream << "\tBRnz\tTEMPLABEL_" << ++TempLabelCounter
-                             << "\n";
+            FuncInstBufferStream << "\tBRnz\tTEMPLABEL_" << ++TempLabelCounter
+                                 << "\n";
             break;
           case CmpInst::ICMP_UGE:
-            InstBufferStream << "\tBRn\t\tTEMPLABEL_" << ++TempLabelCounter
-                             << "\n";
+            FuncInstBufferStream << "\tBRn\t\tTEMPLABEL_" << ++TempLabelCounter
+                                 << "\n";
             break;
           case CmpInst::ICMP_ULT:
-            InstBufferStream << "\tBRzp\tTEMPLABEL_" << ++TempLabelCounter
-                             << "\n";
+            FuncInstBufferStream << "\tBRzp\tTEMPLABEL_" << ++TempLabelCounter
+                                 << "\n";
             break;
           case CmpInst::ICMP_ULE:
-            InstBufferStream << "\tBRp\t\tTEMPLABEL_" << ++TempLabelCounter
-                             << "\n";
+            FuncInstBufferStream << "\tBRp\t\tTEMPLABEL_" << ++TempLabelCounter
+                                 << "\n";
             break;
           default:
             return ParseError(I);
           }
 
-          InstBufferStream << "\tADD\t\tR3, R3, #1\n"
-                           << "TEMPLABEL_" << TempLabelCounter << "\n"
-                           << "\tST\t\tR3, VALUE_" << ResID << "\n";
+          FuncInstBufferStream << "\tADD\t\tR3, R3, #1\n"
+                               << "TEMPLABEL_" << TempLabelCounter << "\n"
+                               << "\tSTR\t\tR3, R5, #" << ResOff << "\n";
         } else if (auto *CallI = dyn_cast<CallInst>(&I)) {
           if (Function *Func = CallI->getCalledFunction()) {
             if (Func->getName() == "printStrImm") {
               if (CallI->arg_size() == 1) {
                 Value *Str = CallI->getArgOperand(0);
-                int StrID = getID(Str, ValueIDMap, ValueIDCounter);
-                addString(Str, StrID, AllocateBufferStream, AllocatedFlag);
 
-                InstBufferStream << "\tLEA\t\tR0, VALUE_" << StrID << "\n"
-                                 << "\tPUTS\n";
+                if (int StrID = addImmidiate(Str, ImmBufferStream, ImmFlag,
+                                             ImmIDMap, ImmIDCounter)) {
+                  FuncInstBufferStream << "\tLEA\t\tR0, VALUE_" << StrID
+                                       << "\n";
+                } else {
+                  int StrOff =
+                      -getIndex(Str, ValueOffsetMap, ValueOffsetCounter);
+                  FuncInstBufferStream << "\tADD\t\tR0, R5, #" << StrOff
+                                       << "\n";
+                }
+
+                FuncInstBufferStream << "\tPUTS\n";
               } else {
                 return ParseError(I);
               }
             } else if (Func->getName() == "printStrAddr") {
               if (CallI->arg_size() == 1) {
                 Value *Addr = CallI->getArgOperand(0);
-                int AddrID = getID(Addr, ValueIDMap, ValueIDCounter);
-                addImmidiate(Addr, AddrID, AllocateBufferStream, AllocatedFlag);
+                if (int AddrID = addImmidiate(Addr, ImmBufferStream, ImmFlag,
+                                              ImmIDMap, ImmIDCounter)) {
+                  FuncInstBufferStream << "\tLD\t\tR0, VALUE_" << AddrID
+                                       << "\n";
+                } else {
+                  int AddrOff =
+                      -getIndex(Addr, ValueOffsetMap, ValueOffsetCounter);
+                  FuncInstBufferStream << "\tLDR\t\tR0, R5, #" << AddrOff
+                                       << "\n";
+                }
 
-                InstBufferStream << "\tLD\t\tR0, VALUE_" << AddrID << "\n"
-                                 << "\tPUTS\n";
+                FuncInstBufferStream << "\tPUTS\n";
               } else {
                 return ParseError(I);
               }
             } else if (Func->getName() == "printCharAddr") {
               if (CallI->arg_size() == 1) {
                 Value *Addr = CallI->getArgOperand(0);
-                int AddrID = getID(Addr, ValueIDMap, ValueIDCounter);
-                addImmidiate(Addr, AddrID, AllocateBufferStream, AllocatedFlag);
+                if (int AddrID = addImmidiate(Addr, ImmBufferStream, ImmFlag,
+                                              ImmIDMap, ImmIDCounter)) {
+                  FuncInstBufferStream << "\tLD\t\tR1, VALUE_" << AddrID
+                                       << "\n";
+                } else {
+                  int AddrOff =
+                      -getIndex(Addr, ValueOffsetMap, ValueOffsetCounter);
+                  FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << AddrOff
+                                       << "\n";
+                }
 
-                InstBufferStream << "\tLDI\t\tR0, VALUE_" << AddrID << "\n"
-                                 << "\tOUT\n";
+                FuncInstBufferStream << "\tLDR\t\tR0, R1, #0\n"
+                                     << "\tOUT\n";
               } else {
                 return ParseError(I);
               }
             } else if (Func->getName() == "printCharImm") {
               if (CallI->arg_size() == 1) {
                 Value *Char = CallI->getArgOperand(0);
-                int CharID = getID(Char, ValueIDMap, ValueIDCounter);
-                addImmidiate(Char, CharID, AllocateBufferStream, AllocatedFlag);
+                if (int CharID = addImmidiate(Char, ImmBufferStream, ImmFlag,
+                                              ImmIDMap, ImmIDCounter)) {
+                  FuncInstBufferStream << "\tLD\t\tR0, VALUE_" << CharID
+                                       << "\n";
+                } else {
+                  int CharOff =
+                      -getIndex(Char, ValueOffsetMap, ValueOffsetCounter);
+                  FuncInstBufferStream << "\tLDR\t\tR0, R5, #" << CharOff
+                                       << "\n";
+                }
 
-                InstBufferStream << "\tLD\t\tR0, VALUE_" << CharID << "\n"
-                                 << "\tOUT\n";
+                FuncInstBufferStream << "\tOUT\n";
               } else {
                 return ParseError(I);
               }
@@ -358,7 +435,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                 Value *Str = CallI->getArgOperand(0);
                 StringRef Content = getString(Str);
                 if (Content != "") {
-                  InstBufferStream << Content << "\n";
+                  FuncInstBufferStream << Content << "\n";
                 } else {
                   return ParseError(I);
                 }
@@ -367,14 +444,15 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
               }
             } else if (Func->getName() == "loadLabel") {
               if (CallI->arg_size() == 1) {
-                int DesID = getID(&I, ValueIDMap, ValueIDCounter);
+                int DesOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
 
                 Value *Str = CallI->getArgOperand(0);
                 StringRef Label = getString(Str);
 
                 if (Label != "") {
-                  InstBufferStream << "\tLD\t\tR1, " << Label << "\n"
-                                   << "\tST\t\tR1, VALUE_" << DesID << "\n";
+                  FuncInstBufferStream << "\tLD\t\tR1, " << Label << "\n"
+                                       << "\tSTR\t\tR1, R5, #" << DesOff
+                                       << "\n";
                 } else {
                   return ParseError(I);
                 }
@@ -383,28 +461,36 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
               }
             } else if (Func->getName() == "loadAddr") {
               if (CallI->arg_size() == 1) {
-                int DesID = getID(&I, ValueIDMap, ValueIDCounter);
+                int DesOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
 
                 Value *Addr = CallI->getArgOperand(0);
-                int AddrID = getID(Addr, ValueIDMap, ValueIDCounter);
-                addImmidiate(Addr, AddrID, AllocateBufferStream, AllocatedFlag);
+                if (int AddrID = addImmidiate(Addr, ImmBufferStream, ImmFlag,
+                                              ImmIDMap, ImmIDCounter)) {
+                  FuncInstBufferStream << "\tLD\t\tR1, VALUE_" << AddrID
+                                       << "\n";
+                } else {
+                  int AddrOff =
+                      -getIndex(Addr, ValueOffsetMap, ValueOffsetCounter);
+                  FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << AddrOff
+                                       << "\n";
+                }
 
-                InstBufferStream << "\tLDI\t\tR1, VALUE_" << AddrID << "\n"
-                                 << "\tST\t\tR1, VALUE_" << DesID << "\n";
+                FuncInstBufferStream << "\tLDR\t\tR1, R1, #0\n"
+                                     << "\tSTR\t\tR1, R5, #" << DesOff << "\n";
               } else {
                 return ParseError(I);
               }
             } else if (Func->getName() == "storeLabel") {
               if (CallI->arg_size() == 2) {
                 Value *Src = CallI->getArgOperand(0);
-                int SrcID = getID(Src, ValueIDMap, ValueIDCounter);
+                int SrcOff = -getIndex(Src, ValueOffsetMap, ValueOffsetCounter);
 
                 Value *Str = CallI->getArgOperand(1);
                 StringRef Label = getString(Str);
 
                 if (Label != "") {
-                  InstBufferStream << "\tLD\t\tR1, VALUE_" << SrcID << "\n"
-                                   << "\tST\t\tR1, " << Label << "\n";
+                  FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << SrcOff << "\n"
+                                       << "\tST\t\tR1, " << Label << "\n";
                 } else {
                   return ParseError(I);
                 }
@@ -414,27 +500,35 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
             } else if (Func->getName() == "storeAddr") {
               if (CallI->arg_size() == 2) {
                 Value *Src = CallI->getArgOperand(0);
-                int SrcID = getID(Src, ValueIDMap, ValueIDCounter);
+                int SrcOff = -getIndex(Src, ValueOffsetMap, ValueOffsetCounter);
+                FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << SrcOff << "\n";
 
                 Value *Addr = CallI->getArgOperand(1);
-                int AddrID = getID(Addr, ValueIDMap, ValueIDCounter);
-                addImmidiate(Addr, AddrID, AllocateBufferStream, AllocatedFlag);
-
-                InstBufferStream << "\tLD\t\tR1, VALUE_" << SrcID << "\n"
-                                 << "\tSTI\t\tR1, VALUE_" << AddrID << "\n";
+                if (int AddrID = addImmidiate(Addr, ImmBufferStream, ImmFlag,
+                                              ImmIDMap, ImmIDCounter)) {
+                  FuncInstBufferStream << "\tSTI\t\tR1, VALUE_" << AddrID
+                                       << "\n";
+                } else {
+                  int AddrOff =
+                      -getIndex(Addr, ValueOffsetMap, ValueOffsetCounter);
+                  FuncInstBufferStream << "\tLDR\t\tR2, R5, #" << AddrOff
+                                       << "\n"
+                                       << "\tSTR\t\tR1, R2, #0";
+                }
               } else {
                 return ParseError(I);
               }
             } else if (Func->getName() == "readLabelAddr") {
               if (CallI->arg_size() == 1) {
-                int DesID = getID(&I, ValueIDMap, ValueIDCounter);
+                int DesOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
 
                 Value *Str = CallI->getArgOperand(0);
                 StringRef Label = getString(Str);
 
                 if (Label != "") {
-                  InstBufferStream << "\tLEA\t\tR1, " << Label << "\n"
-                                   << "\tST\t\tR1, VALUE_" << DesID << "\n";
+                  FuncInstBufferStream << "\tLEA\t\tR1, " << Label << "\n"
+                                       << "\tSTR\t\tR1, R5, #" << DesOff
+                                       << "\n";
                 } else {
                   return ParseError(I);
                 }
@@ -446,16 +540,29 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
               if (int ArgSize = CallI->arg_size()) {
                 for (int i = 0; i < ArgSize; i++) {
                   Value *Arg = CallI->getArgOperand(i);
-                  int ArgID = getID(Arg, ValueIDMap, ValueIDCounter);
-                  addImmidiate(Arg, ArgID, AllocateBufferStream, AllocatedFlag);
-                  InstBufferStream << "\tLD\t\tR" << i << ", VALUE_" << ArgID
-                                   << "\n";
+                  if (int ArgID = addImmidiate(Arg, ImmBufferStream, ImmFlag,
+                                               ImmIDMap, ImmIDCounter)) {
+                    FuncInstBufferStream << "\tLD\t\tR" << i << ", VALUE_"
+                                         << ArgID << "\n";
+                  } else {
+                    int ArgOff =
+                        -getIndex(Arg, ValueOffsetMap, ValueOffsetCounter);
+                    FuncInstBufferStream << "\tLDR\t\tR" << i << ", R5, #"
+                                         << ArgOff << "\n";
+                  }
                 }
               }
-              InstBufferStream << "\tJSR\t\tLABEL_" << FuncID << "\n";
+              FuncInstBufferStream << "\tJSR\t\tLABEL_" << FuncID << "\n";
               if (!CallI->getType()->isVoidTy()) {
-                int ResID = getID(&I, ValueIDMap, ValueIDCounter);
-                InstBufferStream << "\tST\t\tR0, VALUE_" << ResID << "\n";
+                if (int ResID = addImmidiate(&I, ImmBufferStream, ImmFlag,
+                                             ImmIDMap, ImmIDCounter)) {
+                  FuncInstBufferStream << "\tST\t\tR0, VALUE_" << ResID << "\n";
+                } else {
+                  int ResOff =
+                      -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
+                  FuncInstBufferStream << "\tSTR\t\tR0, R5, #" << ResOff
+                                       << "\n";
+                }
               }
             } else {
               return ParseError(I);
@@ -466,85 +573,140 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
         } else if (auto *AllocaI = dyn_cast<AllocaInst>(&I)) {
           continue;
         } else if (auto *PHIN = dyn_cast<PHINode>(&I)) {
-          int ResID = getID(&I, ValueIDMap, ValueIDCounter);
+          int ResOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
 
-          InstBufferStream << "\tNOT\t\tR2, R6\n"
-                           << "\tADD\t\tR2, R2, #1\n";
+          FuncInstBufferStream << "\tNOT\t\tR2, R7\n"
+                               << "\tADD\t\tR2, R2, #1\n";
           int ArgSize = PHIN->getNumIncomingValues();
           int EndLableID = TempLabelCounter + ArgSize;
           for (unsigned int i = 0; i < ArgSize; ++i) {
-            Value *Val = PHIN->getIncomingValue(i);
-            int ValID = getID(Val, ValueIDMap, ValueIDCounter);
-            addImmidiate(Val, ValID, AllocateBufferStream, AllocatedFlag);
 
             BasicBlock *SrcBB = PHIN->getIncomingBlock(i);
-            int SrcBBID = getID(SrcBB, BBIDMap, BBIDCounter);
+            int SrcBBID = getIndex(SrcBB, BBIDMap, BBIDCounter);
 
-            InstBufferStream << "\tLEA\t\tR1, LABEL_" << SrcBBID << "\n"
-                             << "\tADD\t\tR1, R1, R2\n"
-                             << "\tBRnp\tTEMPLABEL_" << ++TempLabelCounter
-                             << "\n"
-                             << "\tLD\t\tR1, VALUE_" << ValID << "\n"
-                             << "\tST\t\tR1, VALUE_" << ResID << "\n";
-            if (i < ArgSize - 1) {
-              InstBufferStream << "\tBR\t\tTEMPLABEL_" << EndLableID << "\n";
+            FuncInstBufferStream << "\tLEA\t\tR1, LABEL_" << SrcBBID << "\n"
+                                 << "\tADD\t\tR1, R1, R2\n"
+                                 << "\tBRnp\tTEMPLABEL_" << ++TempLabelCounter
+                                 << "\n";
+
+            Value *Val = PHIN->getIncomingValue(i);
+            if (int ValID = addImmidiate(Val, ImmBufferStream, ImmFlag,
+                                         ImmIDMap, ImmIDCounter)) {
+              FuncInstBufferStream << "\tLD\t\tR1, VALUE_" << ValID << "\n";
+            } else {
+              int ValOff = -getIndex(Val, ValueOffsetMap, ValueOffsetCounter);
+              FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << ValOff << "\n";
             }
-            InstBufferStream << "TEMPLABEL_" << TempLabelCounter << "\n";
+
+            FuncInstBufferStream << "\tSTR\t\tR1, R5, #" << ResOff << "\n";
+            if (i < ArgSize - 1) {
+              FuncInstBufferStream << "\tBR\t\tTEMPLABEL_" << EndLableID
+                                   << "\n";
+            }
+            FuncInstBufferStream << "TEMPLABEL_" << TempLabelCounter << "\n";
           }
         } else if (auto *RetI = dyn_cast<ReturnInst>(&I)) {
           if (Value *Val = RetI->getReturnValue()) {
-            int ValID = getID(Val, ValueIDMap, ValueIDCounter);
-            addImmidiate(Val, ValID, AllocateBufferStream, AllocatedFlag);
-            InstBufferStream << "\tLD\t\tR0, VALUE_" << ValID << "\n";
+            if (int ValID = addImmidiate(Val, ImmBufferStream, ImmFlag,
+                                         ImmIDMap, ImmIDCounter)) {
+              FuncInstBufferStream << "\tLD\t\tR0, VALUE_" << ValID << "\n";
+            } else {
+              int ValOff = -getIndex(Val, ValueOffsetMap, ValueOffsetCounter);
+              FuncInstBufferStream << "\tLDR\t\tR0, R5, #" << ValOff << "\n";
+            }
           }
-          if (F.getName() != "main") {
-            InstBufferStream << "\tRET\n";
-          } else {
-            InstBufferStream << "\tHALT\n";
-          }
+          FuncInstBufferStream << "; restore R5, R6, R7\n";
+          FuncInstBufferStream << "\tADD\t\tR6, R5, #0\n";
+          FuncInstBufferStream << "\tLDR\t\tR5, R6, #0\n"
+                               << "\tADD\t\tR6, R6, #1\n";
+          FuncInstBufferStream << "\tLDR\t\tR7, R6, #0\n"
+                               << "\tADD\t\tR6, R6, #1\n";
+          FuncInstBufferStream << "\tRET\n";
           continue;
         } else if (I.getOpcode() == Instruction::ZExt ||
                    I.getOpcode() == Instruction::SExt ||
                    I.getOpcode() == Instruction::Trunc) {
           continue;
         } else if (auto *SelI = dyn_cast<SelectInst>(&I)) {
-          int ResID = getID(&I, ValueIDMap, ValueIDCounter);
+          int ResOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
 
           Value *Cond = SelI->getCondition();
-          int CondID = getID(Cond, ValueIDMap, ValueIDCounter);
+          int CondOff = -getIndex(Cond, ValueOffsetMap, ValueOffsetCounter);
 
           Value *IfTrue = SelI->getTrueValue();
-          int IfTrueID = getID(IfTrue, ValueIDMap, ValueIDCounter);
-          addImmidiate(IfTrue, IfTrueID, AllocateBufferStream, AllocatedFlag);
+          if (int IfTrueID = addImmidiate(IfTrue, ImmBufferStream, ImmFlag,
+                                          ImmIDMap, ImmIDCounter)) {
+            FuncInstBufferStream << "\tLD\t\tR2, VALUE_" << IfTrueID << "\n";
+          } else {
+            int IfTrueOff =
+                -getIndex(IfTrue, ValueOffsetMap, ValueOffsetCounter);
+            FuncInstBufferStream << "\tLDR\t\tR2, R5, #" << IfTrueOff << "\n";
+          }
+
+          FuncInstBufferStream << "\tLDR\t\tR1, R5, #" << CondOff << "\n"
+                               << "\tBRp\t\tTEMPLABEL_" << ++TempLabelCounter
+                               << "\n";
 
           Value *IfFalse = SelI->getFalseValue();
-          int IfFalseID = getID(IfFalse, ValueIDMap, ValueIDCounter);
-          addImmidiate(IfFalse, IfFalseID, AllocateBufferStream, AllocatedFlag);
+          if (int IfFalseID = addImmidiate(IfFalse, ImmBufferStream, ImmFlag,
+                                           ImmIDMap, ImmIDCounter)) {
+            FuncInstBufferStream << "\tLD\t\tR2, VALUE_" << IfFalseID << "\n";
+          } else {
+            int IfFalseOff =
+                -getIndex(IfFalse, ValueOffsetMap, ValueOffsetCounter);
+            FuncInstBufferStream << "\tLDR\t\tR2, R5, #" << IfFalseOff << "\n";
+          }
 
-          InstBufferStream << "\tLD\t\tR2, VALUE_" << IfTrueID << "\n"
-                           << "\tLD\t\tR1, VALUE_" << CondID << "\n"
-                           << "\tBRp\t\tTEMPLABEL_" << ++TempLabelCounter
-                           << "\n"
-                           << "\tLD\t\tR2, VALUE_" << IfFalseID << "\n"
-                           << "TEMPLABEL_" << TempLabelCounter << "\n"
-                           << "\tST\t\tR2, VALUE_" << ResID << "\n";
+          FuncInstBufferStream << "TEMPLABEL_" << TempLabelCounter << "\n"
+                               << "\tSTR\t\tR2, R5, #" << ResOff << "\n";
         } else {
           return ParseError(I);
         }
       }
-      InstBufferStream << "\n";
+
+      FuncInstBufferStream << "\n";
+      if (!ImmBuffer.empty()) {
+        FuncInstBufferStream << "; static value section for LABEL_" << BBID
+                             << "\n"
+                             << ImmBufferStream.str() << "\n";
+      }
     }
+
+    InstBufferStream << "; function " << FuncName << "\n";
+    InstBufferStream << "; local variable count: " << ValueOffsetCounter << "\n";
+    InstBufferStream << "LABEL_" << FuncIDMap[&F] << "\n";
+    InstBufferStream << "; init R6, R5, store old R5, R7\n";
+    InstBufferStream << "\tADD\t\tR6, R6, #-1\n"
+                     << "\tSTR\t\tR7, R6, #0\n";
+    InstBufferStream << "\tADD\t\tR6, R6, #-1\n"
+                     << "\tSTR\t\tR5, R6, #0\n";
+    InstBufferStream << "\tADD\t\tR5, R6, #0\n";
+    if (ValueOffsetCounter < 32) {
+      if (ValueOffsetCounter > 16) {
+        InstBufferStream << "\tADD\t\tR6, R6, #-16\n";
+        ValueOffsetCounter -= 16;
+      }
+      if (ValueOffsetCounter) {
+        InstBufferStream << "\tADD\t\tR6, R6, #-" << ValueOffsetCounter << "\n";
+      }
+    } else {
+      errs() << "Too many local variables: " << ValueOffsetCounter << "\n"
+             << "No file generated.\n";
+      return PreservedAnalyses::all();
+    }
+    if (int argSize = F.arg_size()) {
+      InstBufferStream << "; store arguments\n";
+      for (int i = 0; i < argSize; i++) {
+        Value *Arg = F.getArg(i);
+        int ArgOff = -getIndex(Arg, ValueOffsetMap, ValueOffsetCounter);
+        InstBufferStream << "\tSTR\t\tR" << i << ", R5, #" << ArgOff << "\n";
+      }
+    }
+
+    InstBufferStream << FuncInstBufferStream.str();
   }
 
-  for (auto [Val, ValID] : ValueIDMap) {
-    if (AllocatedFlag.count(Val) == 0) {
-      AllocateBufferStream << "VALUE_" << ValID << "\n"
-                           << "\t.BLKW\t1\n";
-    }
-  }
-
-  Out.os() << InstBufferStream.str() << AllocateBufferStream.str()
-           << "\n\t.END";
+  Out.os() << InstBufferStream.str() << "\t.END";
 
   Out.keep();
 
@@ -556,7 +718,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 extern "C" LLVM_ATTRIBUTE_WEAK ::PassPluginLibraryInfo llvmGetPassPluginInfo() {
   return {LLVM_PLUGIN_API_VERSION,
           "LLVMIRToLC3Pass", // Plugin Name
-          "v0.1",            // Plugin Version
+          "v0.2",            // Plugin Version
           [](PassBuilder &PB) {
             // Register the callback to parse the pass name in command line
             PB.registerPipelineParsingCallback(

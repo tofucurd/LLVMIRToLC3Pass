@@ -2,7 +2,14 @@
 
 ## Introduction
 
-This is a simple LLVM pass that can translate a subset of LLVM-IR Instructions (generated from C code) into LC-3 Assembly. It supports the following LLVM-IR Instructions: ``add``,``and``,``shl``,``mul``,``alloca``,``store``,``br``,``load``,``icmp``,``phi``,``select``,``call``. Note that there is no need to translate Integer Coversion Instructions (``sext``,``zext``,``trunc``,etc.), because in LC-3 everything has a fixed 16-bit length. Also, this pass cannot handle any floating point instructions, because LC-3 doesn't support them. This pass is simple enough that it doesn't have the concept of stack, heap, frame, etc. It treats every LLVM IR virtual register as an address in memory arbitrarily and does no optimization.
+This is a simple LLVM pass that can translate a subset of LLVM-IR Instructions (generated from C code) into LC-3 Assembly. It supports the following LLVM-IR Instructions: ``add``,``and``,``shl``,``mul``,``alloca``,``store``,``br``,``load``,``icmp``,``phi``,``select``,``call``. 
+
+Note that:
+- This pass uses R6 as the stack pointer, R5 as the frame pointer and R7 as PC saver.
+- There is no translation for Integer Coversion Instructions (``sext``,``zext``,``trunc``,etc.), because in LC-3 everything has a fixed 16-bit length.
+- This pass treats every unsigned number as signed.
+- This pass cannot handle any floating point instructions, because LC-3 doesn't support them.
+- It treats every LLVM IR virtual register as an address in memory arbitrarily and does no optimization.
 
 ## Build
 
@@ -11,7 +18,7 @@ First, you need to clone this repo.
 Second, install the dependents:
 
 - CMake (version >= 3.13)
-- LLVM toolchain, **headers and libraries** (LLVM version >= 12)
+- LLVM toolchain, **headers and libraries** (version >= 12)
 
 Then, build with CMake:
 ```
@@ -27,16 +34,35 @@ After you get a ``LLVMIRToLC3Pass.so`` in ``build/``, you can use it to translat
 First, compile the C source file into LLVM-IR file.
 
 ```
+# in the repo directory
 clang example.c -O0 -S -emit-llvm -o example.ll
 ```
 
-Second, use ``opt`` to run the pass. Note that option ``-lc3-start-addr=<addr>`` specifies the starting address of the assembly file, the default value is ``x3000``, and option ``-signed-mul`` enables the signed integer mulplication support, otherwise the pass will only translate unsigned multiplication.
+Second, use ``opt`` to run the pass.
+
+Special Options:
+
+- ``-lc3-start-addr=<addr>`` -  Specify the starting address of the LC-3 program, default ``"x3000"``
+- ``-lc3-stack-base=<addr>`` - Specify the base address of the stack memory of the LC-3 program, default ``"xFE00"``
+- ``-signed-mul`` - Enable signed multiplication, default off.
+
+An example to run the pass with options:
 
 ```
-opt -load-pass-plugin=build/LLVMIRToLC3Pass.so -passes="llvm-ir-to-lc3-pass" -lc3-start-addr="x3000" -signed-mul -disable-output -S example.ll
+# in the repo directory
+opt -load-pass-plugin=build/LLVMIRToLC3Pass.so \
+    -passes="llvm-ir-to-lc3-pass" \
+    -lc3-start-addr="x4000" \
+    -lc3-stack-base="x5000" \
+    -signed-mul \
+    -disable-output -S example.ll
 ```
 
-Then, you will get ``eample.asm`` that can be recognized by ``lc3as``.
+If you get error message ``Unsupported instruction: <LLVM IR Inst>``, then it means you must change your code to fit the pass.
+
+If you get error message ``Too many local variables: <Count>``, then it means the count of the local variable exceeded the max count LC-3 ISA support. You can compile the origin C code with a higher optimization level to try to solve this problem.
+
+If there is no error, you will get a ``.asm`` file that can be recognized by ``lc3as``.
 
 ## Code With the Pass
 
@@ -44,12 +70,10 @@ This project also provides a ``LC3.h`` header for you to access the memory and t
 
 To begin with, first include the ``LC3.h`` header. Note that LC-3 cannot call functions, so you cannot use any libc functions.
 
-Then, you must write only one function, i.e. a ``main()`` function with no arguments. Note that this pass cannot handle all instructions, so be carefull to not write any unsupported operations (e.g. right shift or division).
+The pass provides 10 functions for special operations, you can check them out in ``LC3.h``.
 
-The pass provides 10 functions for special operations, you can check them in ``LC3.h``.
-
-If you get error message begin with ``Unsupported instruction:``, then it means you must change your code to fit the pass.
+Note that this pass cannot handle all instructions, so be carefull to not write any unsupported operations (e.g. right shift or division).
 
 ## TODO
 
-Add support for stack allocation.
+Add support for global variable and array.
