@@ -2,13 +2,13 @@
 
 ## Introduction
 
-This is a simple LLVM pass that can translate a subset of LLVM-IR Instructions (generated from C code) into LC-3 Assembly. It supports the following LLVM-IR Instructions: ``add``,``and``,``shl``,``mul``,``alloca``,``store``,``br``,``load``,``icmp``,``phi``,``select``,``call``,``udiv``,``urem``,``lshr``.
+This is a simple LLVM pass that can translate a subset of LLVM-IR Instructions (generated from C code) into LC-3 Assembly. It supports the following LLVM-IR Instructions: ``add``,``and``,``shl``,``mul``,``alloca``,``store``,``br``,``load``,``icmp``,``phi``,``select``,``call``,``udiv``,``urem``,``lshr``,``switch``.
 
 Note that:
 - This pass uses R6 as the stack pointer, R5 as the frame pointer and R7 as PC saver.
 - This pass treats every unsigned number as signed.
 - This pass cannot handle any floating point instructions, because LC-3 doesn't support them.
-- It treats every LLVM IR virtual register as an address in memory arbitrarily and does no optimization.
+- It treats every LLVM IR virtual register as an address in memory arbitrarily.
 
 ## Build
 
@@ -34,7 +34,7 @@ First, compile the C source file into LLVM-IR file.
 
 ```
 # in the repo directory
-clang example.c -O0 -S -emit-llvm -o example.ll
+clang example.c -O1 -S -emit-llvm -o example.ll
 ```
 
 Second, use ``opt`` to run the pass.
@@ -67,11 +67,13 @@ If there is no error, you will get a ``.asm`` file that can be recognized by ``l
 
 This project also provides a ``LC3.h`` header for you to access the memory and to print something to screen when writing C code.
 
-To begin with, first include the ``LC3.h`` header. Note that LC-3 cannot call functions, so you cannot use any libc functions.
+To begin with, first include the ``LC3.h`` header. Note that you cannot include any libc headers.
 
 The pass provides 10 functions for special operations, you can check them out in ``LC3.h``.
 
-Note that this pass cannot handle all instructions, so be carefull to not write any unsupported operations (e.g. right shift or division).
+Do not use signed types as variable type (except main), avoid using ``char``. Try to represent anything in ``unsigned``.
+
+Note that this pass cannot handle all instructions, so be carefull to not write any unsupported operations.
 
 ## TODO
 

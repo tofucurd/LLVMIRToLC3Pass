@@ -1,22 +1,40 @@
 // print the string s stored at addr
-void printStrAddr(int addr);
+void printStrAddr(unsigned addr);
 // print the string s
 void printStr(const char *str);
 // print the char stored at addr
-void printCharAddr(int addr);
+void printCharAddr(unsigned addr);
 // print the char c
-void printChar(char c);
+void printChar(unsigned c);
 
 // integrate a single LC-3 assembly instruction ins (no \n)
 void integrateLC3Asm(const char *ins);
 
 // load value at label into des
-int loadLabel(const char *label);
+unsigned loadLabel(const char *label);
 // load value at addr into des
-int loadAddr(int addr);
+unsigned loadAddr(unsigned addr);
 // read the address of label into des
-int readLabelAddr(const char *label);
+unsigned readLabelAddr(const char *label);
 // store value of src into label
-void storeLabel(int src, const char *label);
+void storeLabel(unsigned src, const char *label);
 // store value of src into addr
-void storeAddr(int src, int addr);
+void storeAddr(unsigned src, unsigned addr);
+
+void printInt(unsigned x) {
+  if (x > 10)
+    printInt(x / 10);
+  printChar('0' + x % 10);
+}
+
+void printStrIntStr(const char *spre, unsigned x, const char *ssuf) {
+  printStr(spre);
+  printInt(x);
+  printStr(ssuf);
+}
+
+void printStrCharStr(const char *spre, unsigned c, const char *ssuf) {
+  printStr(spre);
+  printChar(c);
+  printStr(ssuf);
+}

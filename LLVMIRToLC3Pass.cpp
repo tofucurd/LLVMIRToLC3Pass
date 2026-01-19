@@ -1,16 +1,25 @@
 #include "LLVMIRToLC3Pass.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Instruction.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/ToolOutputFile.h"
-#include <llvm/ADT/STLExtras.h>
-#include <llvm/IR/IRBuilder.h>
-#include <llvm/IR/InstrTypes.h>
-#include <llvm/IR/Instruction.h>
-#include <llvm/IR/IntrinsicInst.h>
-#include <llvm/IR/Intrinsics.h>
-#include <llvm/Support/Casting.h>
+#include <cstdint>
+#include <llvm/ADT/APInt.h>
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/StringRef.h>
+#include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/Support/raw_ostream.h>
 
 using namespace llvm;
 
@@ -83,10 +92,30 @@ int addString(Value *Val, raw_string_ostream &ImmBuffer,
 }
 
 auto UnsupportInst(Instruction &I) {
-  errs() << "Unsupported Instruction: ";
+  errs() << "Unsupported Instruction:\n";
   I.print(errs());
   errs() << "\nNo File Generated\n";
-  return PreservedAnalyses::all();
+  return PreservedAnalyses::none();
+}
+
+std::string addPrefixInst(Instruction &I, StringRef Prefix) {
+  std::string Buffer;
+  raw_string_ostream BufferStream(Buffer);
+  I.print(BufferStream);
+
+  StringRef Out(BufferStream.str());
+  SmallVector<StringRef, 4> Lines;
+
+  Out.split(Lines, '\n');
+
+  std::string Result;
+  raw_string_ostream ResultStream(Result);
+  for (StringRef Line : Lines) {
+    if (!Line.empty()) {
+      ResultStream << Prefix << " " << Line << "\n";
+    }
+  }
+  return ResultStream.str();
 }
 
 PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
@@ -100,7 +129,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
   if (EC) {
     errs() << "Error: " << EC.message() << "\n";
-    return PreservedAnalyses::all();
+    return PreservedAnalyses::none();
   }
 
   Out.os() << "; This file is generated automatically by ir-to-lc3 pass.\n"
@@ -153,6 +182,10 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
       DenseMap<Value *, int> ImmIDMap;
       std::string ImmBuffer;
       raw_string_ostream ImmBufferStream(ImmBuffer);
+
+      LLVMContext &Ctx = F.getContext();
+      Type *WordTy = Type::getInt32Ty(Ctx);
+
       for (auto &I : make_early_inc_range(BB)) {
         if (auto *IntrI = dyn_cast<IntrinsicInst>(&I)) {
           CmpInst::Predicate Pred;
@@ -181,26 +214,95 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
           Value *A = IntrI->getArgOperand(0);
           Value *B = IntrI->getArgOperand(1);
 
-          Value *Cmp = Builder.CreateICmp(Pred, A, B, "minmax.cmp");
-          Value *Select = Builder.CreateSelect(Cmp, A, B, "minmax.res");
+          Value *Cmp = Builder.CreateICmp(Pred, A, B);
+          Value *Select = Builder.CreateSelect(Cmp, A, B);
 
           IntrI->replaceAllUsesWith(Select);
           IntrI->eraseFromParent();
+        } else if (auto *BrI = dyn_cast<BranchInst>(&I)) {
+          if (BrI->isConditional()) {
+            Value *Cond = BrI->getCondition();
+
+            if (auto *ICmpI = dyn_cast<ICmpInst>(Cond)) {
+              auto Pred = ICmpI->getPredicate();
+              if (Pred == CmpInst::ICMP_EQ ||
+                  Pred == CmpInst::ICMP_NE) {
+                Value *FirVal = ICmpI->getOperand(0);
+                if (auto *ConstInt = dyn_cast<ConstantInt>(FirVal)) {
+                  ICmpI->swapOperands();
+                }
+                Value *Val = ICmpI->getOperand(0);
+                Value *ConVal = ICmpI->getOperand(1);
+                if (auto *ConstInt = dyn_cast<ConstantInt>(ConVal)) {
+                  IRBuilder<> Builder(BrI);
+                  auto *Zero =
+                      ConstantInt::get(WordTy, -ConstInt->getSExtValue());
+                  SwitchInst *SI = Builder.CreateSwitch(
+                      Val, BrI->getSuccessor(Pred == CmpInst::ICMP_EQ), 1);
+                  SI->addCase(cast<ConstantInt>(Zero),
+                              BrI->getSuccessor(Pred == CmpInst::ICMP_NE));
+
+                  BrI->eraseFromParent();
+                  if (ICmpI->use_empty())
+                    ICmpI->eraseFromParent();
+                }
+              }
+            }
+          }
+        } else if (auto *TruncI = dyn_cast<TruncInst>(&I)) {
+          Value *Source = TruncI->getOperand(0);
+
+          TruncI->replaceAllUsesWith(Source);
+          TruncI->eraseFromParent();
+        } else if (auto *BinOp = dyn_cast<BinaryOperator>(&I)) {
+          auto OpCode = BinOp->getOpcode();
+          Value *A = I.getOperand(0);
+          Value *B = I.getOperand(1);
+          switch (OpCode) {
+          case Instruction::LShr:
+            if (auto *ShiftAmt = dyn_cast<ConstantInt>(B)) {
+              unsigned BitWidth = A->getType()->getIntegerBitWidth();
+              uint64_t ShiftVal = ShiftAmt->getZExtValue();
+
+              if (ShiftVal >= BitWidth) {
+                continue;
+              }
+
+              APInt DivisorVal = APInt(BitWidth, 1).shl(ShiftVal);
+              Constant *Divisor = ConstantInt::get(I.getContext(), DivisorVal);
+
+              IRBuilder<> Builder(&I);
+              Value *DivInst = Builder.CreateUDiv(A, Divisor);
+              I.replaceAllUsesWith(DivInst);
+              I.eraseFromParent();
+            }
+            break;
+          case Instruction::Or:
+            if (auto *DisjointOp = dyn_cast<PossiblyDisjointInst>(BinOp)) {
+              IRBuilder<> Builder(&I);
+
+              Value *AddInst = Builder.CreateAdd(A, B);
+
+              I.replaceAllUsesWith(AddInst);
+              I.eraseFromParent();
+            }
+          default:
+            continue;
+          }
         }
       }
+
       for (auto &I : BB) {
-        FuncInstBufferStream << ";";
-        I.print(FuncInstBufferStream);
-        FuncInstBufferStream << "\n";
-        if (auto *BinI = dyn_cast<BinaryOperator>(&I)) {
-          auto OpCode = BinI->getOpcode();
+        FuncInstBufferStream << addPrefixInst(I, ";");
+        if (auto *BinOp = dyn_cast<BinaryOperator>(&I)) {
+          auto OpCode = BinOp->getOpcode();
           if (OpCode == Instruction::Mul || OpCode == Instruction::UDiv) {
             FuncInstBufferStream << "\tAND\t\tR3, R3, #0\n";
           }
 
           int ResOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
 
-          Value *B = BinI->getOperand(1);
+          Value *B = BinOp->getOperand(1);
           if (int BID = addImmidiate(B, ImmBufferStream, ImmFlag, ImmIDMap,
                                      ImmIDCounter)) {
             FuncInstBufferStream << "\tLD\t\tR2, VALUE_" << BID << "\n";
@@ -216,7 +318,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                                  << "\tADD\t\tR4, R4, #1\n";
           }
 
-          Value *A = BinI->getOperand(0);
+          Value *A = BinOp->getOperand(0);
           if (int AID = addImmidiate(A, ImmBufferStream, ImmFlag, ImmIDMap,
                                      ImmIDCounter)) {
             FuncInstBufferStream << "\tLD\t\tR1, VALUE_" << AID << "\n";
@@ -604,7 +706,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                       -getIndex(Addr, ValueOffsetMap, ValueOffsetCounter);
                   FuncInstBufferStream << "\tLDR\t\tR2, R5, #" << AddrOff
                                        << "\n"
-                                       << "\tSTR\t\tR1, R2, #0";
+                                       << "\tSTR\t\tR1, R2, #0\n";
                 }
               } else {
                 return UnsupportInst(I);
@@ -666,8 +768,8 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
         } else if (auto *PHIN = dyn_cast<PHINode>(&I)) {
           int ResOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);
 
-          FuncInstBufferStream << "\tNOT\t\tR2, R7\n"
-                               << "\tADD\t\tR2, R2, #1\n";
+          FuncInstBufferStream << "\tNOT\t\tR0, R7\n"
+                               << "\tADD\t\tR0, R0, #1\n";
           int ArgSize = PHIN->getNumIncomingValues();
           int EndLableID = TempLabelCounter + ArgSize;
           for (unsigned int i = 0; i < ArgSize; ++i) {
@@ -676,7 +778,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
             int SrcBBID = getIndex(SrcBB, BBIDMap, BBIDCounter);
 
             FuncInstBufferStream << "\tLEA\t\tR1, LABEL_" << SrcBBID << "\n"
-                                 << "\tADD\t\tR1, R1, R2\n"
+                                 << "\tADD\t\tR1, R1, R0\n"
                                  << "\tBRnp\tPHI_NEXT_" << ++TempLabelCounter
                                  << "\n";
 
@@ -696,7 +798,6 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
             FuncInstBufferStream << "PHI_NEXT_" << TempLabelCounter << "\n";
           }
         } else if (auto *RetI = dyn_cast<ReturnInst>(&I)) {
-          FuncInstBufferStream << "RETURN_" << BBID << "\n";
           bool hasRetVal = false;
           if (Value *Val = RetI->getReturnValue()) {
             hasRetVal = true;
@@ -762,6 +863,39 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
           FuncInstBufferStream << "SELECT_END_" << TempLabelCounter << "\n"
                                << "\tSTR\t\tR2, R5, #" << ResOff << "\n";
+        } else if (auto *SwitchI = dyn_cast<SwitchInst>(&I)) {
+          Value *Cond = SwitchI->getCondition();
+          int CondOff = -getIndex(Cond, ValueOffsetMap, ValueOffsetCounter);
+
+          BasicBlock *DefaultBB = SwitchI->getDefaultDest();
+          int DefaultBBID = getIndex(DefaultBB, BBIDMap, BBIDCounter);
+
+          FuncInstBufferStream << "\tLEA\t\tR7, LABEL_" << BBID << "\n"
+                               << "\tLDR\t\tR1, R5, #" << CondOff << "\n";
+
+          bool isFirstCase = true;
+          for (auto Case : SwitchI->cases()) {
+            ConstantInt *Val = Case.getCaseValue();
+            int ValID = addImmidiate(Val, ImmBufferStream, ImmFlag, ImmIDMap,
+                                     ImmIDCounter);
+
+            BasicBlock *DesBB = Case.getCaseSuccessor();
+            int DesBBID = getIndex(DesBB, BBIDMap, BBIDCounter);
+
+            if (dyn_cast<ConstantInt>(Val)->getSExtValue() == 0) {
+              if (!isFirstCase) {
+                FuncInstBufferStream << "\tADD\t\tR1, R1, #0";
+              }
+              FuncInstBufferStream << "\tBRz\t\tLABEL_" << DesBBID << "\n";
+            } else {
+              FuncInstBufferStream << "\tLD\t\tR2, VALUE_" << ValID << "\n"
+                                   << "\tADD\t\tR2, R1, R2\n"
+                                   << "\tBRz\t\tLABEL_" << DesBBID << "\n";
+            }
+
+            isFirstCase = false;
+          }
+          FuncInstBufferStream << "\tBR\t\tLABEL_" << DefaultBBID << "\n";
         } else {
           return UnsupportInst(I);
         }
@@ -774,7 +908,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
       }
     }
 
-    InstBufferStream << "; function " << FuncName << "\n";
+    InstBufferStream << "; function " << FuncName << "\n" << FuncName << "\n";
     InstBufferStream << "; local variable count: " << ValueOffsetCounter
                      << "\n";
     InstBufferStream << "LABEL_" << FuncIDMap[&F] << "\n";
@@ -799,7 +933,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
     } else {
       errs() << "Too many local variables: " << ValueOffsetCounter << "\n"
              << "No file generated.\n";
-      return PreservedAnalyses::all();
+      return PreservedAnalyses::none();
     }
     if (int argSize = F.arg_size()) {
       InstBufferStream << "; store arguments\n";
@@ -819,7 +953,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
   errs() << "One file generated: " << TargetFileName << "\n";
 
-  return PreservedAnalyses::all();
+  return PreservedAnalyses::none();
 }
 
 extern "C" LLVM_ATTRIBUTE_WEAK ::PassPluginLibraryInfo llvmGetPassPluginInfo() {
