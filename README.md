@@ -71,7 +71,7 @@ To begin with, first include the ``LC3.h`` header. Note that you cannot include 
 
 The pass provides 10 functions for special operations, you can check them out in ``LC3.h``.
 
-Do not use signed types as variable type (except main), avoid using ``char``. Try to represent anything in ``unsigned``.
+Avoid using ``char``, use ``int`` or ``unsigned int`` instead. Note that this pass does not support signed division or mod, so variables involves these two operations must be unsigned.
 
 Note that this pass cannot handle all instructions, so be carefull to not write any unsupported operations.
 
