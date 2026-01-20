@@ -21,20 +21,16 @@ void storeLabel(unsigned src, const char *label);
 // store value of src into addr
 void storeAddr(unsigned src, unsigned addr);
 
+#ifdef DEBUG
+
 void printInt(unsigned x) {
   if (x > 10)
-    printInt(x / 10);
-  printChar('0' + x % 10);
+  printInt(x / 10);
+printChar('0' + x % 10);
 }
 
-void printStrIntStr(const char *spre, unsigned x, const char *ssuf) {
-  printStr(spre);
-  printInt(x);
-  printStr(ssuf);
-}
+#define printStrIntStr(spre, x, ssuf) printStr(spre), printInt(x), printStr(ssuf);
 
-void printStrCharStr(const char *spre, unsigned c, const char *ssuf) {
-  printStr(spre);
-  printChar(c);
-  printStr(ssuf);
-}
+#define printStrCharStr(spre, c, ssuf) printStr(spre), printChar(c), printStr(ssuf);
+
+#endif
