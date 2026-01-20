@@ -25,12 +25,14 @@ void storeAddr(unsigned src, unsigned addr);
 
 void printInt(unsigned x) {
   if (x > 10)
-  printInt(x / 10);
-printChar('0' + x % 10);
+    printInt(x / 10);
+  printChar('0' + x % 10);
 }
 
-#define printStrIntStr(spre, x, ssuf) printStr(spre), printInt(x), printStr(ssuf);
+#define printStrIntStr(spre, x, ssuf)                                          \
+  printStr(spre), printInt(x), printStr(ssuf);
 
-#define printStrCharStr(spre, c, ssuf) printStr(spre), printChar(c), printStr(ssuf);
+#define printStrCharStr(spre, c, ssuf)                                         \
+  printStr(spre), printChar(c), printStr(ssuf);
 
 #endif
