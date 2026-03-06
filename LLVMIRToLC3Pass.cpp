@@ -237,7 +237,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
       std::string BBName = getIndex(&BB, BBNameMap, BBNameCounter);
 
       if (isFirstBB) {
-        if (FuncName == "main") {
+        if (FuncName == "LC3_main") {
           Out.os() << "\tLD\t\tR6, STACK_BASE\n"
                    << "\tBR\t\t" << BBName << "\n"
                    << "\n"
@@ -945,7 +945,11 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
           if (!hasRetVal) {
             FuncInstBufferStream << "\tLDR\t\tR0, R6, #-1\n";
           }
-          FuncInstBufferStream << "\tRET\n";
+          if (FuncName == "LC3_main") {
+            FuncInstBufferStream << "\tHALT\n";
+          } else {
+            FuncInstBufferStream << "\tRET\n";
+          }
           continue;
         } else if (auto *CastI = dyn_cast<CastInst>(&I)) {
           int ResOff = -getIndex(&I, ValueOffsetMap, ValueOffsetCounter);

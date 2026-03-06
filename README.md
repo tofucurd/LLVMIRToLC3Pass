@@ -74,6 +74,8 @@ To begin with, first include the ``LC3.h`` header. Note that you cannot include 
 
 The pass provides 10 functions for special operations, you can check them out in ``LC3.h``. If you don't want additional debug functions/macros, just define ``Release`` when compiling.
 
+**You must write a main function ``void LC3_main()``, where is the entrance of your program.**
+
 Avoid using ``char``, use ``int`` or ``unsigned int`` instead. Note that this pass does not support signed division or mod, so variables involves these two operations must be unsigned.
 
 Note that this pass cannot handle all instructions, so be carefull to not write any unsupported operations.
