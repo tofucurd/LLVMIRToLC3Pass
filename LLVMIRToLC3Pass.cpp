@@ -83,6 +83,9 @@ int addImmidiate(Value *Val, raw_string_ostream &ImmBuffer,
     if (!ImmFlag.count(Val)) {
       ImmFlag[Val] = true;
       int value = ConstInt->getSExtValue();
+      if (ConstInt->getType()->isIntegerTy(1)) {
+        value = ConstInt->getZExtValue();
+      }
       ImmBuffer << "VALUE_" << ValID << "\n"
                 << "\t.FILL\t#" << value << "\n";
     }
@@ -676,7 +679,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                 } else {
                   int StrOff =
                       -getIndex(Str, ValueOffsetMap, ValueOffsetCounter);
-                  FuncInstBufferStream << "\tADD\t\tR0, R5, #" << StrOff
+                  FuncInstBufferStream << "\tLDR\t\tR0, R5, #" << StrOff
                                        << "\n";
                 }
 

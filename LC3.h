@@ -10,21 +10,21 @@ void printChar(unsigned c);
 // integrate a single LC-3 assembly instruction ins (no \n)
 void integrateLC3Asm(const char *ins);
 
-// load value at label into des
-unsigned loadLabel(const char *label);
-// load value at addr into des
-unsigned loadAddr(unsigned addr);
-// read the address of label into des
+// load value at label
+int loadLabel(const char *label);
+// load value at addr
+int loadAddr(unsigned addr);
+// read the address of label
 unsigned readLabelAddr(const char *label);
 // store value of src into label
-void storeLabel(unsigned src, const char *label);
+void storeLabel(int src, const char *label);
 // store value of src into addr
-void storeAddr(unsigned src, unsigned addr);
+void storeAddr(int src, unsigned addr);
 
-#ifdef DEBUG
+#ifndef Release
 
 void printInt(unsigned x) {
-  if (x > 10)
+  if (x > 9)
     printInt(x / 10);
   printChar('0' + x % 10);
 }

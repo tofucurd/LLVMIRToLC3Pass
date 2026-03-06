@@ -34,7 +34,8 @@ First, compile the C source file into LLVM-IR file.
 
 ```
 # in the repo directory
-# -O1(reduce meaningless code) and -fno-discard-value-names(enhance readability) is recomended
+# -O1(reduce meaningless code) and
+# -fno-discard-value-names(enhance readability) is recomended
 clang example.c -O1 -fno-discard-value-names -S -emit-llvm -o example.ll
 ```
 
@@ -71,7 +72,7 @@ This project also provides a ``LC3.h`` header for you to access the memory and t
 
 To begin with, first include the ``LC3.h`` header. Note that you cannot include any libc headers.
 
-The pass provides 10 functions for special operations, you can check them out in ``LC3.h``. Also, if you want to debug you code, you can just define ``DEBUG`` while compiling your code and use the 3 additional (macro) functions in ``LC3.h`` to help you output the variables.
+The pass provides 10 functions for special operations, you can check them out in ``LC3.h``. If you don't want additional debug functions/macros, just define ``Release`` when compiling.
 
 Avoid using ``char``, use ``int`` or ``unsigned int`` instead. Note that this pass does not support signed division or mod, so variables involves these two operations must be unsigned.
 
