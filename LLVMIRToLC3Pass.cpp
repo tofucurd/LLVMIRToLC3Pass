@@ -16,6 +16,7 @@
 #include <llvm/ADT/APInt.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringRef.h>
+#include <llvm/IR/Analysis.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Instructions.h>
@@ -60,7 +61,7 @@ using namespace llvm;
 static cl::opt<std::string>
     LC3StartAddrArg("lc3-start-addr",
                     cl::desc("Specify the starting address of LC-3 "
-                             "assembly file, default x3000"),
+                             "program, default x3000"),
                     cl::value_desc("lc3-start-addr"), cl::init("x3000"));
 // Example: `-lc3-start-addr="x3200"` to shift program placement.
 // The pass forwards this string verbatim into `.ORIG`.
@@ -68,9 +69,9 @@ static cl::opt<std::string>
 static cl::opt<std::string>
     LC3StackBaseArg("lc3-stack-base",
                     cl::desc("Specify the base address of the stack in LC-3 "
-                             "assembly file, default xFE00"),
+                             "program, default xFE00"),
                     cl::value_desc("lc3-stack-base"), cl::init("xFE00"));
-// Used only when lowering `LC3_main` bootstrap sequence:
+// Used only when lowering LC3Entry bootstrap sequence:
 //   LD R6, STACK_BASE
 //   STACK_BASE .FILL <value>
 
@@ -82,15 +83,26 @@ static cl::opt<bool>
 // - false: pure repeated-addition assuming non-negative multiplier.
 // - true:  sign-normalization prelude before repeated addition.
 
-static cl::opt<bool>
-    NoComment("no-comment",
-              cl::desc("Generate pure LC-3 assembly code without any comment"),
-              cl::value_desc("no-comment"), cl::init(false));
+static cl::opt<bool> NoComment(
+    "no-comment",
+    cl::desc(
+        "Generate pure LC-3 assembly code without any comment, default false"),
+    cl::value_desc("no-comment"), cl::init(false));
 // Helpful for final submission output where comments are undesirable.
 // When false, emitted asm includes:
 // - original LLVM IR (prefixed comments)
 // - register usage hints
 // - function/block metadata
+
+static cl::opt<std::string>
+    LC3Entry("lc3-entry",
+             cl::desc("Specify the name of entry function of the LC-3 program, "
+                      "default LC3_main"),
+             cl::value_desc("lc3-entry"), cl::init("LC3_main"));
+// Specify the entry function of the program, used when branching to the entry
+// of the program:
+//   LD R6, STACK_BASE
+//   BR <value>
 
 // Assign a stable 1-based integer id for a Value within a local map.
 // The pass uses these ids for stack-slot indexing and constant labels.
@@ -324,6 +336,9 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
   int ImmIDCounter = 0;
   int TempLabelCounter = 0;
 
+  bool hasEntry = false;
+  // Flag to mark whether the program has the entry function
+
   // Visit each defined function and lower it independently.
   for (auto &F : M) {
     // Skip declarations/intrinsics: they carry no body to lower.
@@ -347,11 +362,12 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
       if (isFirstBB) {
         // Program entry bootstrap: initialize stack pointer only once at
-        // `LC3_main`, then branch to that function's first lowered block.
-        if (FuncName == "LC3_main") {
-          // Convention: `LC3_main` is the executable entry symbol.
+        // LC3Entry, then branch to that function's first lowered block.
+        if (FuncName == LC3Entry) {
+          // Convention: LC3Entry is the executable entry symbol.
           // Stack pointer is initialized once here before jumping into function
           // body. Other functions inherit caller-provided R6 state.
+          hasEntry = true;
           Out.os() << "\tLD\t\tR6, STACK_BASE\n"
                    << "\tBR\t\t" << BBName << "\n"
                    << "\n"
@@ -1237,7 +1253,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
             // Preserve caller-visible R0 when function returns void.
             FuncInstBufferStream << "\tLDR\t\tR0, R6, #-1\n";
           }
-          if (FuncName == "LC3_main") {
+          if (FuncName == LC3Entry && !hasRetVal) {
             FuncInstBufferStream << "\tHALT\n";
           } else {
             FuncInstBufferStream << "\tRET\n";
@@ -1344,18 +1360,22 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
         FuncInstBufferStream << ImmBufferStream.str() << "\n";
       }
     }
+
+    std::string FuncBuffer;
+    raw_string_ostream FuncBufferStream(FuncBuffer);
+
     if (!NoComment) {
       // Summary metadata for quick debugging of generated function frame.
-      InstBufferStream << ";\tfunction " << FuncName << "\n";
-      InstBufferStream << ";\targument count: " << F.arg_size() << "\n";
-      InstBufferStream << ";\tlocal variable count: " << ValueOffsetCounter
+      FuncBufferStream << ";\tfunction " << FuncName << "\n";
+      FuncBufferStream << ";\targument count: " << F.arg_size() << "\n";
+      FuncBufferStream << ";\tlocal variable count: " << ValueOffsetCounter
                        << "\n";
     }
     // Function symbol + entry basic-block label.
-    InstBufferStream << FuncName << "\n";
-    InstBufferStream << FuncLabelMap[&F] << "\n";
+    FuncBufferStream << FuncName << "\n";
+    FuncBufferStream << FuncLabelMap[&F] << "\n";
     if (!NoComment) {
-      InstBufferStream << ";\tinit R6, R5, save old registers\n";
+      FuncBufferStream << ";\tinit R6, R5, save old registers\n";
     }
     // Prologue: save volatile state and establish frame pointer.
     // Stack layout after prologue:
@@ -1367,7 +1387,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
     //   [R5+5] old R1
     //   [R5+6] old R0
     // Locals are then allocated at negative offsets from R5.
-    InstBufferStream << "\tADD\t\tR6, R6, #-7\n"
+    FuncBufferStream << "\tADD\t\tR6, R6, #-7\n"
                      << "\tSTR\t\tR0, R6, #6\n"
                      << "\tSTR\t\tR1, R6, #5\n"
                      << "\tSTR\t\tR2, R6, #4\n"
@@ -1380,36 +1400,48 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
     // up to 32 virtual locals due to immediate range and simple allocator.
     if (ValueOffsetCounter <= 32) {
       if (ValueOffsetCounter > 16) {
-        InstBufferStream << "\tADD\t\tR6, R6, #-16\n";
+        FuncBufferStream << "\tADD\t\tR6, R6, #-16\n";
         ValueOffsetCounter -= 16;
       }
       if (ValueOffsetCounter) {
-        InstBufferStream << "\tADD\t\tR6, R6, #-" << ValueOffsetCounter << "\n";
+        FuncBufferStream << "\tADD\t\tR6, R6, #-" << ValueOffsetCounter << "\n";
       }
     } else {
-      errs() << "Too many local variables: " << ValueOffsetCounter << "\n"
+      errs() << "Too many local variables in function " << FuncName << ", count : "
+             << ValueOffsetCounter << "\n"
              << "No file generated.\n";
       return PreservedAnalyses::none();
     }
     // Spill incoming register arguments into their frame slots.
     if (int argSize = F.arg_size()) {
       if (!NoComment) {
-        InstBufferStream << ";\tstore arguments\n";
+        FuncBufferStream << ";\tstore arguments\n";
       }
       for (int i = 0; i < argSize; i++) {
         Value *Arg = F.getArg(i);
         // Each argument is treated like a regular SSA value by assigning it a
         // frame slot in ValueOffsetMap.
         int ArgOff = -getIndex(Arg, ValueOffsetMap, ValueOffsetCounter);
-        InstBufferStream << "\tSTR\t\tR" << i << ", R5, #" << ArgOff << "\n";
+        FuncBufferStream << "\tSTR\t\tR" << i << ", R5, #" << ArgOff << "\n";
       }
     }
 
-    InstBufferStream << FuncInstBufferStream.str();
+    FuncBufferStream << FuncInstBufferStream.str();
+
+    if (FuncName == LC3Entry) {
+      Out.os() << FuncBufferStream.str();
+    } else {
+      InstBufferStream << FuncBufferStream.str();
+    }
   }
 
   // Finalize the module output and materialize the target file.
   Out.os() << InstBufferStream.str() << "\t.END";
+
+  if (!hasEntry) {
+    errs() << "Entry function \"" << LC3Entry << "\" not found!\n";
+    return PreservedAnalyses::none();
+  }
 
   // Commit temporary output to final path only after successful generation.
   Out.keep();

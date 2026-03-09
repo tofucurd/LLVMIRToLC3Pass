@@ -30,9 +30,12 @@ void printInt(unsigned x) {
 }
 
 #define printStrIntStr(spre, x, ssuf)                                          \
-  printStr(spre), printInt(x), printStr(ssuf);
+  printStr(spre), printInt(x), printStr(ssuf)
 
 #define printStrCharStr(spre, c, ssuf)                                         \
-  printStr(spre), printChar(c), printStr(ssuf);
+  printStr(spre), printChar(c), printStr(ssuf)
+
+#define printStrAddrStr(spre, a, ssuf)                                         \
+  printStr(spre), printStrAddr(a), printStr(ssuf)
 
 #endif

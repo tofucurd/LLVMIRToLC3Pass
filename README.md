@@ -43,6 +43,7 @@ Second, use ``opt`` to run the pass.
 
 Pass Options:
 
+- ``-lc3-entry=<entry>`` - Specify the entry function of the LC-3 program, default ``"LC3_main"``
 - ``-lc3-start-addr=<addr>`` -  Specify the starting address of the LC-3 program, default ``"x3000"``
 - ``-lc3-stack-base=<addr>`` - Specify the base address of the stack memory of the LC-3 program, default ``"xFE00"``
 - ``-signed-mul`` - Enable signed multiplication, default off.
@@ -74,7 +75,7 @@ To begin with, first include the ``LC3.h`` header. Note that you cannot include 
 
 The pass provides 10 functions for special operations, you can check them out in ``LC3.h``. If you don't want additional debug functions/macros, just define ``Release`` when compiling.
 
-**You must write a main function ``void LC3_main()``, where is the entrance of your program.**
+**You must write a main function(Specified by lc3-entry, default "LC3_main"), where is the entry of your program.**
 
 Avoid using ``char``, use ``int`` or ``unsigned int`` instead. Note that this pass does not support signed division or mod, so variables involves these two operations must be unsigned.
 

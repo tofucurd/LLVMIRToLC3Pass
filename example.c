@@ -9,8 +9,8 @@ int f(unsigned a, unsigned b) {
 int foo(int x) {
   return x > 0 ? foo(x - 1) * x : 1;
 }
-int main() {
+void LC3_main() {
   int x = f(7, 2);
   int y = foo(7);
-  return 0;
+  return;
 }
