@@ -45,32 +45,29 @@ using namespace llvm;
 //      values.
 //
 // 3) Calling model (implemented by this pass)
-//    - Up to five arguments are passed in R0..R4.
-//    - Return values are produced in R0.
-//    - Prologue saves registers and establishes R5 frame pointer.
+//    - Arguments are pushed onto the stack by the caller.
+//    - Return values are stored in a dedicated stack slot by the callee.
+//    - Prologue saves R7, old R5, and establishes R5 as the frame pointer.
+//    - Caller is responsible for popping arguments off the stack post-call.
 //
 // 4) Safety strategy
 //    - If an instruction is unsupported, we abort file generation immediately.
 //      Emitting no file is safer than emitting potentially wrong assembly.
 //
 // -----------------------------------------------------------------------------
-// Pass configuration flags
-// -----------------------------------------------------------------------------
-// These options are exposed through `opt`/`clang` when the plugin is loaded.
-// They control assembler layout details and optional codegen behavior.
 static cl::opt<std::string>
-    LC3StartAddrArg("lc3-start-addr",
-                    cl::desc("Specify the starting address of LC-3 "
-                             "program, default x3000"),
-                    cl::value_desc("lc3-start-addr"), cl::init("x3000"));
+    LC3StartAddr("lc3-start-addr",
+                 cl::desc("Specify the starting address of LC-3 "
+                          "program, default x3000"),
+                 cl::value_desc("lc3-start-addr"), cl::init("x3000"));
 // Example: `-lc3-start-addr="x3200"` to shift program placement.
 // The pass forwards this string verbatim into `.ORIG`.
 
 static cl::opt<std::string>
-    LC3StackBaseArg("lc3-stack-base",
-                    cl::desc("Specify the base address of the stack in LC-3 "
-                             "program, default xFE00"),
-                    cl::value_desc("lc3-stack-base"), cl::init("xFE00"));
+    LC3StackBase("lc3-stack-base",
+                 cl::desc("Specify the base address of the stack in LC-3 "
+                          "program, default xFE00"),
+                 cl::value_desc("lc3-stack-base"), cl::init("xFE00"));
 // Used only when lowering LC3Entry bootstrap sequence:
 //   LD R6, STACK_BASE
 //   STACK_BASE .FILL <value>
@@ -104,15 +101,21 @@ static cl::opt<std::string>
 //   LD R6, STACK_BASE
 //   BR <value>
 
-// Assign a stable 1-based integer id for a Value within a local map.
+// Assign a stable integer id for a Value within a local map.
 // The pass uses these ids for stack-slot indexing and constant labels.
 //
-// Why 1-based:
-// - `0` is used by helper callers as a sentinel for "not applicable"
-//   (for example `addImmidiate` returns 0 for non-constants).
+// Function arguments are assigned specific negative IDs (e.g., -4, -5)
+// to directly map them to their incoming stack offsets relative to R5.
+// Regular SSA values are assigned monotonic 0-based counters (which are
+// offset by +1 when used for labels).
 int getIndex(Value *Val, DenseMap<Value *, int> &Map, int &Counter) {
   if (Map.count(Val) == 0) {
-    Map[Val] = ++Counter;
+    if (auto *Arg = dyn_cast<Argument>(Val)) {
+      unsigned Index = Arg->getArgNo();
+      Map[Val] = -4 - Index;
+    } else {
+      Map[Val] = Counter++;
+    }
   }
   return Map[Val];
 }
@@ -143,7 +146,7 @@ std::string getIndex(BasicBlock *BB, DenseMap<Value *, std::string> &Map,
                      int &Counter) {
   if (Map.count(BB) == 0) {
     Map[BB] = BB->getParent()->getName().str() + "_" + getBBName(BB) + "_" +
-              std::to_string(++Counter);
+              std::to_string(Counter++);
   }
   return Map[BB];
 }
@@ -160,7 +163,7 @@ int addImmidiate(Value *Val, raw_string_ostream &ImmBuffer,
                  DenseMap<Value *, bool> &ImmFlag,
                  DenseMap<Value *, int> &ImmMap, int &ImmCounter) {
   if (auto *ConstInt = dyn_cast<ConstantInt>(Val)) {
-    int ValID = getIndex(Val, ImmMap, ImmCounter);
+    int ValID = getIndex(Val, ImmMap, ImmCounter) + 1;
     if (!ImmFlag.count(Val)) {
       ImmFlag[Val] = true;
       int value = ConstInt->getSExtValue();
@@ -202,7 +205,7 @@ int addString(Value *Val, raw_string_ostream &ImmBuffer,
               int &ImmCounter) {
   auto Str = getString(Val);
   if (Str.size() > 0) {
-    int ValID = getIndex(Val, ImmMap, ImmCounter);
+    int ValID = getIndex(Val, ImmMap, ImmCounter) + 1;
     if (!ImmFlag.count(Val)) {
       ImmFlag[Val] = true;
       ImmBuffer << "VALUE_" << ValID << "\n"
@@ -323,7 +326,7 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
              << ";\tR5 : frame pointer\n"
              << "\n";
   }
-  Out.os() << "\t.ORIG\t" << LC3StartAddrArg << "\n";
+  Out.os() << "\t.ORIG\t" << LC3StartAddr << "\n";
   // `.ORIG` anchors program layout; all labels are relative to this segment.
 
   // Cross-function bookkeeping:
@@ -362,16 +365,15 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
 
       if (isFirstBB) {
         // Program entry bootstrap: initialize stack pointer only once at
-        // LC3Entry, then branch to that function's first lowered block.
+        // LC3Entry, then use JSR to invoke the entry function, and HALT upon
+        // return.
         if (FuncName == LC3Entry) {
-          // Convention: LC3Entry is the executable entry symbol.
-          // Stack pointer is initialized once here before jumping into function
-          // body. Other functions inherit caller-provided R6 state.
           hasEntry = true;
           Out.os() << "\tLD\t\tR6, STACK_BASE\n"
-                   << "\tBR\t\t" << BBName << "\n"
+                   << "\tJSR\t\t" << LC3Entry << "\n"
+                   << "\tHALT\n"
                    << "\n"
-                   << "STACK_BASE\n\t.FILL\t" << LC3StackBaseArg << "\n"
+                   << "STACK_BASE\n\t.FILL\t" << LC3StackBase << "\n"
                    << "\n";
         }
         FuncLabelMap[&F] = BBName;
@@ -1127,31 +1129,37 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
               } else {
                 return UnsupportInst(I);
               }
-            } else if (CallI->arg_size() <= 5 && FuncLabelMap.count(Func)) {
+            } else if (FuncLabelMap.count(Func)) {
               // User function call convention:
-              // - first up to five args passed in R0..R4
+              // - arguments are pushed onto the stack
               // - JSR by function name
-              // - return value in R0 (stored if non-void)
+              // - return value is retrieved from the stack (if non-void)
+              // - caller is responsible for popping arguments off the stack
               // Calls to functions outside current module are rejected unless
               // mapped by built-in helper names above.
               StringRef CalledFuncName = Func->getName();
-              if (int ArgSize = CallI->arg_size()) {
-                for (int i = 0; i < ArgSize; i++) {
+              int ArgSize = 0;
+              if ((ArgSize = CallI->arg_size())) {
+                for (int i = ArgSize - 1; i >= 0; i--) {
+                  FuncInstBufferStream << "\tADD\t\tR6, R6, #-1\n";
                   Value *Arg = CallI->getArgOperand(i);
                   if (int ArgID = addImmidiate(Arg, ImmBufferStream, ImmFlag,
                                                ImmIDMap, ImmIDCounter)) {
-                    FuncInstBufferStream << "\tLD\t\tR" << i << ", VALUE_"
-                                         << ArgID << "\n";
+                    FuncInstBufferStream << "\tLD\t\tR0, VALUE_" << ArgID
+                                         << "\n"
+                                         << "\tSTR\t\tR0, R6, #0\n";
                   } else {
                     int ArgOff =
                         -getIndex(Arg, ValueOffsetMap, ValueOffsetCounter);
-                    FuncInstBufferStream << "\tLDR\t\tR" << i << ", R5, #"
-                                         << ArgOff << "\n";
+                    FuncInstBufferStream << "\tLDR\t\tR0, R5, #" << ArgOff
+                                         << "\n"
+                                         << "\tSTR\t\tR0, R6, #0\n";
                   }
                 }
               }
               FuncInstBufferStream << "\tJSR\t\t" << CalledFuncName << "\n";
               if (!CallI->getType()->isVoidTy()) {
+                FuncInstBufferStream << "\tLDR\t\tR0, R6, #0\n";
                 if (int ResID = addImmidiate(&I, ImmBufferStream, ImmFlag,
                                              ImmIDMap, ImmIDCounter)) {
                   FuncInstBufferStream << "\tST\t\tR0, VALUE_" << ResID << "\n";
@@ -1161,6 +1169,17 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
                   FuncInstBufferStream << "\tSTR\t\tR0, R5, #" << ResOff
                                        << "\n";
                 }
+              }
+              if (!NoComment) {
+                FuncInstBufferStream << ";\tPop return value, arguments\n";
+              }
+              int PopStep = ArgSize + 1;
+              while (PopStep > 15) {
+                FuncInstBufferStream << "\tADD\t\tR6, R6, #15\n";
+                PopStep -= 15;
+              }
+              if (PopStep) {
+                FuncInstBufferStream << "\tADD\t\tR6, R6, #" << PopStep << "\n";
               }
             } else {
               return UnsupportInst(I);
@@ -1222,11 +1241,15 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
           }
         } else if (auto *RetI = dyn_cast<ReturnInst>(&I)) {
           // Function epilogue:
-          // 1) move return value (if any) to R0
-          // 2) restore callee-saved/call-frame registers
-          // 3) HALT for entry function, RET otherwise
+          // 1) store return value (if any) into the caller's reserved stack
+          // slot [R5+3] 2) pop local variables, restore frame pointer (R5) and
+          // return address (R7) 3) RET (HALT is now handled strictly in the
+          // bootstrap sequence)
           bool hasRetVal = false;
           if (Value *Val = RetI->getReturnValue()) {
+            if (!NoComment) {
+              FuncInstBufferStream << ";\tSave return value\n";
+            }
             hasRetVal = true;
             if (int ValID = addImmidiate(Val, ImmBufferStream, ImmFlag,
                                          ImmIDMap, ImmIDCounter)) {
@@ -1235,29 +1258,24 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
               int ValOff = -getIndex(Val, ValueOffsetMap, ValueOffsetCounter);
               FuncInstBufferStream << "\tLDR\t\tR0, R5, #" << ValOff << "\n";
             }
+            FuncInstBufferStream << "\tSTR\t\tR0, R5, #3\n";
           }
           if (!NoComment) {
-            FuncInstBufferStream << ";\trestore registers\n";
+            FuncInstBufferStream << ";\tPop local variables, R5, R7\n";
           }
-          // Restore in reverse of prologue save layout:
-          // [R5, R7, R4, R3, R2, R1, R0] relative to frame base.
-          FuncInstBufferStream << "\tADD\t\tR6, R5, #0\n"
-                               << "\tLDR\t\tR5, R6, #0\n"
-                               << "\tLDR\t\tR7, R6, #1\n"
-                               << "\tLDR\t\tR4, R6, #2\n"
-                               << "\tLDR\t\tR3, R6, #3\n"
-                               << "\tLDR\t\tR2, R6, #4\n"
-                               << "\tLDR\t\tR1, R6, #5\n"
-                               << "\tADD\t\tR6, R6, #7\n";
-          if (!hasRetVal) {
-            // Preserve caller-visible R0 when function returns void.
-            FuncInstBufferStream << "\tLDR\t\tR0, R6, #-1\n";
+          FuncInstBufferStream << "\tADD\t\tR6, R5, #3\n";
+          if (!NoComment) {
+            FuncInstBufferStream << ";\tRestore frame pointer\n";
           }
-          if (FuncName == LC3Entry && !hasRetVal) {
-            FuncInstBufferStream << "\tHALT\n";
-          } else {
-            FuncInstBufferStream << "\tRET\n";
+          FuncInstBufferStream << "\tLDR\t\tR5, R6, #-2\n";
+          if (!NoComment) {
+            FuncInstBufferStream << ";\tRestore R7\n";
           }
+          FuncInstBufferStream << "\tLDR\t\tR7, R6, #-1\n";
+          if (!NoComment) {
+            FuncInstBufferStream << ";\tReturn to caller\n";
+          }
+          FuncInstBufferStream << "\tRET\n";
           continue;
         } else if (auto *CastI = dyn_cast<CastInst>(&I)) {
           // Integer casts collapse to move/copy in this word-sized model.
@@ -1374,28 +1392,31 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
     // Function symbol + entry basic-block label.
     FuncBufferStream << FuncName << "\n";
     FuncBufferStream << FuncLabelMap[&F] << "\n";
-    if (!NoComment) {
-      FuncBufferStream << ";\tinit R6, R5, save old registers\n";
-    }
-    // Prologue: save volatile state and establish frame pointer.
-    // Stack layout after prologue:
-    //   [R5+0] old R5
-    //   [R5+1] old R7
-    //   [R5+2] old R4
-    //   [R5+3] old R3
-    //   [R5+4] old R2
-    //   [R5+5] old R1
-    //   [R5+6] old R0
+
+    // Prologue: reserve space for return value, save volatile state, and
+    // establish frame pointer. Stack layout relative to the new frame pointer
+    // (R5):
+    //   [R5+4...] incoming arguments (Arg 0 at R5+4, Arg 1 at R5+5, etc.)
+    //   [R5+3]    space reserved for return value
+    //   [R5+2]    old R7 (return address)
+    //   [R5+1]    old R5 (caller's frame pointer)
     // Locals are then allocated at negative offsets from R5.
-    FuncBufferStream << "\tADD\t\tR6, R6, #-7\n"
-                     << "\tSTR\t\tR0, R6, #6\n"
-                     << "\tSTR\t\tR1, R6, #5\n"
-                     << "\tSTR\t\tR2, R6, #4\n"
-                     << "\tSTR\t\tR3, R6, #3\n"
-                     << "\tSTR\t\tR4, R6, #2\n"
-                     << "\tSTR\t\tR7, R6, #1\n"
-                     << "\tSTR\t\tR5, R6, #0\n"
-                     << "\tADD\t\tR5, R6, #0\n";
+    if (!NoComment) {
+      FuncBufferStream << ";\tSpace for return value, R7, R5\n";
+    }
+    FuncBufferStream << "\tADD\t\tR6, R6, #-3\n";
+    if (!NoComment) {
+      FuncBufferStream << ";\tSave R7\n";
+    }
+    FuncBufferStream << "\tSTR\t\tR7, R6, #1\n";
+    if (!NoComment) {
+      FuncBufferStream << ";\tSave R5\n";
+    }
+    FuncBufferStream << "\tSTR\t\tR5, R6, #0\n";
+    if (!NoComment) {
+      FuncBufferStream << ";\tSet frame pointer\n";
+    }
+    FuncBufferStream << "\tADD\t\tR5, R6, #-1\n";
     // Reserve frame space for SSA values. Current implementation supports
     // up to 32 virtual locals due to immediate range and simple allocator.
     if (ValueOffsetCounter <= 32) {
@@ -1407,23 +1428,10 @@ PreservedAnalyses LLVMIRToLC3Pass::run(Module &M, ModuleAnalysisManager &MAM) {
         FuncBufferStream << "\tADD\t\tR6, R6, #-" << ValueOffsetCounter << "\n";
       }
     } else {
-      errs() << "Too many local variables in function " << FuncName << ", count : "
-             << ValueOffsetCounter << "\n"
+      errs() << "Too many local variables in function " << FuncName
+             << ", count : " << ValueOffsetCounter << "\n"
              << "No file generated.\n";
       return PreservedAnalyses::none();
-    }
-    // Spill incoming register arguments into their frame slots.
-    if (int argSize = F.arg_size()) {
-      if (!NoComment) {
-        FuncBufferStream << ";\tstore arguments\n";
-      }
-      for (int i = 0; i < argSize; i++) {
-        Value *Arg = F.getArg(i);
-        // Each argument is treated like a regular SSA value by assigning it a
-        // frame slot in ValueOffsetMap.
-        int ArgOff = -getIndex(Arg, ValueOffsetMap, ValueOffsetCounter);
-        FuncBufferStream << "\tSTR\t\tR" << i << ", R5, #" << ArgOff << "\n";
-      }
     }
 
     FuncBufferStream << FuncInstBufferStream.str();

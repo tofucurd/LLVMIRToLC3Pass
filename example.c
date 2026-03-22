@@ -12,5 +12,7 @@ int foo(int x) {
 void LC3_main() {
   int x = f(7, 2);
   int y = foo(7);
+  printStrIntStr("-x:", -x, "\n");
+  printStrIntStr("y:", y, "\n");
   return;
 }

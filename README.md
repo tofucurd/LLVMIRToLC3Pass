@@ -85,4 +85,5 @@ If you just use this pass to generate functions, note that the functions generat
 
 ## TODO
 
-Add support for global variable and array. Complete comment generating functioin.
+Add support for global variable management using R4.
+Add support for dynamic allocating.
