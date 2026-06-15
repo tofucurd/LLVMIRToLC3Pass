@@ -1,24 +1,23 @@
-// print the string s stored at addr
+// --- standard I/O ---
+// printf with compile-time format string.  Supports %d, %s, %c.
+int printf(const char *fmt, ...);
+// sprintf: like printf but writes into buf (must be large enough).
+int sprintf(char *buf, const char *fmt, ...);
+// scanf with compile-time format string.  Supports %d, %s, %c.
+int scanf(const char *fmt, ...);
+// sscanf: like scanf but reads from buf instead of console.
+int sscanf(const char *buf, const char *fmt, ...);
+
+// --- legacy helpers (kept for backward compatibility) ---
 void printStrAddr(unsigned addr);
-// print the string s
 void printStr(const char *str);
-// print the char stored at addr
 void printCharAddr(unsigned addr);
-// print the char c
 void printChar(unsigned c);
-
-// integrate a single LC-3 assembly instruction ins (no \n)
 void integrateLC3Asm(const char *ins);
-
-// load value at label
 int loadLabel(const char *label);
-// load value at addr
 int loadAddr(unsigned addr);
-// read the address of label
 unsigned readLabelAddr(const char *label);
-// store value of src into label
 void storeLabel(int src, const char *label);
-// store value of src into addr
 void storeAddr(int src, unsigned addr);
 
 #ifndef Release

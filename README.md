@@ -1,89 +1,92 @@
-# A Simple LLVM-IR To LC-3 Assembly LLVM Pass
+# LLVM-IR To LC-3 Assembly Pass
 
-## Introduction
+An out-of-tree LLVM pass that translates a subset of LLVM IR (generated from C) into LC-3 assembly.
 
-This is a simple LLVM pass that can translate a subset of LLVM-IR Instructions (generated from C code) into LC-3 Assembly. It supports the following LLVM-IR Instructions: ``add``,``and``,``shl``,``mul``,``alloca``,``store``,``br``,``load``,``icmp``,``phi``,``select``,``call``,``udiv``,``urem``,``lshr``,``switch``.
+## Supported Instructions
 
-Note that:
-- This pass uses R6 as the stack pointer, R5 as the frame pointer and R7 as PC saver.
-- This pass treats every unsigned number as signed.
-- This pass cannot handle any floating point instructions, because LC-3 doesn't support them.
-- It treats every LLVM IR virtual register as an address in memory arbitrarily.
+`add`, `sub`, `mul`, `and`, `or`, `shl`, `lshr`, `ashr`, `udiv`, `urem`, `alloca`, `load`, `store`, `br`, `icmp` (signed + unsigned), `phi`, `select`, `call`, `switch`, `getelementptr`, `trunc`, bitcast, and `llvm.smin/smax/umin/umax` intrinsics.
+
+## Runtime Support
+
+| Function | Description |
+|---|---|
+| `printf(fmt, ...)` | Formatted output — `%d`, `%s`, `%c` |
+| `sprintf(buf, fmt, ...)` | Formatted output to buffer |
+| `scanf(fmt, ...)` | Formatted input — `%d`, `%s`, `%c` |
+| `sscanf(buf, fmt, ...)` | Formatted input from buffer |
+| `printStr` / `printChar` / etc. | Legacy helpers (kept for compatibility) |
+
+Pointer operators `&` and `*` are fully supported. Global variables, global arrays, and stack-allocated arrays work correctly.
+
+## Pass Options
+
+| Option | Default | Description |
+|---|---|---|
+| `-lc3-entry=<name>` | `LC3_main` | Entry function name |
+| `-lc3-start-addr=<addr>` | `x3000` | Program start address |
+| `-lc3-stack-base=<addr>` | `xFE00` | Stack base address |
+| `-lc3-global-addr=<addr>` | _(end of program)_ | Global data section address |
+| `-signed-mul` | off | Enable signed multiplication |
+| `-no-comment` | off | Suppress generated comments |
 
 ## Build
 
-First, you need to clone this repo.
-
-Second, install the dependents:
-
-- CMake (version >= 3.13)
-- LLVM toolchain, **headers and libraries** (version >= 12)
-
-Then, build with CMake:
-```
-# in the repo directory
+```sh
+# Requires: CMake >= 3.13, LLVM >= 12 (headers + libraries)
 mkdir build && cd build
 cmake ..
 make
 ```
+
 ## Usage
 
-After you get a ``LLVMIRToLC3Pass.so`` in ``build/``, you can use it to translate the LLVM-IR file. To do so, take the ``example.c`` in this repo for example.
-
-First, compile the C source file into LLVM-IR file.
-
-```
-# in the repo directory
-# -O1(reduce meaningless code) and
-# -fno-discard-value-names(enhance readability) is recomended
+```sh
+# Compile C to LLVM IR
 clang example.c -O1 -fno-discard-value-names -S -emit-llvm -o example.ll
-```
 
-Second, use ``opt`` to run the pass.
-
-Pass Options:
-
-- ``-lc3-entry=<entry>`` - Specify the entry function of the LC-3 program, default ``"LC3_main"``
-- ``-lc3-start-addr=<addr>`` -  Specify the starting address of the LC-3 program, default ``"x3000"``
-- ``-lc3-stack-base=<addr>`` - Specify the base address of the stack memory of the LC-3 program, default ``"xFE00"``
-- ``-signed-mul`` - Enable signed multiplication, default off.
-- ``-no-comment`` - Disable generating the comments, default off.
-
-An example to run the pass with options:
-
-```
-# in the repo directory
+# Run the pass
 opt -load-pass-plugin=build/LLVMIRToLC3Pass.so \
     -passes="llvm-ir-to-lc3-pass" \
-    -lc3-start-addr="x4000" \
-    -lc3-stack-base="x5000" \
-    -signed-mul \
     -disable-output -S example.ll
+
+# Assemble and simulate (requires lc3tools)
+lc3as example.asm
+lc3sim example.obj
 ```
 
-If you get error message ``Unsupported instruction: <LLVM IR Inst>``, then it means you must change your code to fit the pass.
+## LC3.h
 
-If you get error message ``Too many local variables: <Count>``, then it means the count of the local variable exceeded the max count LC-3 ISA support. You can compile the origin C code with a higher optimization level to try to solve this problem. Or, you can try to split a long function into several small functions.
+Include `LC3.h` in your C code for access to `printf`/`scanf` and memory helpers.  Do not include libc headers.  Use `int` or `unsigned int` instead of `char`.  The entry function must be named `LC3_main` (or the name passed to `-lc3-entry`).
 
-If there is no error, you will get a ``.asm`` file that can be recognized by ``lc3as``.
+## Register Convention
 
-## Code With the Pass
+| Register | Role |
+|---|---|
+| R0 | I/O temporary (OUT / GETC operand) |
+| R1–R3 | Computation temporaries |
+| R4 | Global data base pointer |
+| R5 | Frame pointer |
+| R6 | Stack pointer |
+| R7 | Return address / PHI predecessor label |
 
-This project also provides a ``LC3.h`` header for you to access the memory and to print something to screen when writing C code.
+## Testing
 
-To begin with, first include the ``LC3.h`` header. Note that you cannot include any libc headers.
+```sh
+# Full test suite (35 tests, 3 tiers)
+cmake -B build && make -C build && ctest --test-dir build --output-on-failure
 
-The pass provides 10 functions for special operations, you can check them out in ``LC3.h``. If you don't want additional debug functions/macros, just define ``Release`` when compiling.
+# Tiers:
+#   LL tests (12) — verify pass generates output
+#   C tests  (7)  — full .c → clang → opt pipeline
+#   Sim tests (16) — full pipeline through lc3as + lc3sim with output verification
 
-**You must write a main function(Specified by lc3-entry, default "LC3_main"), where is the entry of your program.**
+# Requires: lc3as and lc3sim on PATH for sim tests
+```
 
-Avoid using ``char``, use ``int`` or ``unsigned int`` instead. Note that this pass does not support signed division or mod, so variables involves these two operations must be unsigned.
+## Limitations
 
-Note that this pass cannot handle all instructions, so be carefull to not write any unsupported operations.
-
-If you just use this pass to generate functions, note that the functions generated by this pass uses R6 as stack pointer, be careful about the value of R6 when calling the functions generated by this pass.
-
-## TODO
-
-Add support for global variable management using R4.
-Add support for dynamic allocating.
+- No floating-point support (LC-3 has no FPU)
+- No signed division / modulo (use `unsigned` for `/` and `%`)
+- Max 32 local variables per function (LC-3 LDR/STR immediate range)
+- `fastcc` / tail-call functions need `-fno-optimize-sibling-calls`
+- Format strings for `printf`/`scanf` must be compile-time constants
